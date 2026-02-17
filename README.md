@@ -6,7 +6,7 @@ Web security vulnerabilities can be grouped into three broad areas: **server-sid
 
 These issues live in the application server, backend services, databases, and internal network integrations. They often lead to data access, account takeover, remote code execution, or internal network compromise.
 
-- SQL Injection 
+- [SQL Injection](https://github.com/vsang181/Web-Security/tree/main#:~:text=8%20Commits-,SQL%20injection,-Create%20SQL%20injection) 
 - Authentication issues 
 - Path Traversal
 - Command Injection
