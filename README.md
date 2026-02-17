@@ -11,7 +11,7 @@ These issues live in the application server, backend services, databases, and in
 - [Path Traversal](https://github.com/vsang181/Web-Security/tree/main/Path%20Traversal)
 - [Command Injection](https://github.com/vsang181/Web-Security/tree/main/Command%20Injection)
 - [Business Logic Vulnerabilities](https://github.com/vsang181/Web-Security/tree/main/Business%20Logic%20Vulnerabilities)
-- Information Disclosure
+- [Information Disclosure](https://github.com/vsang181/Web-Security/tree/main/Information%20disclosure)
 - Access Control issues 
 - File Upload Vulnerabilities
 - Race Conditions 
