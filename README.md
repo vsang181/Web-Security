@@ -10,7 +10,7 @@ These issues live in the application server, backend services, databases, and in
 - [Authentication issues](https://github.com/vsang181/Web-Security/tree/main/Authentication%20issues) 
 - [Path Traversal](https://github.com/vsang181/Web-Security/tree/main/Path%20Traversal)
 - [Command Injection](https://github.com/vsang181/Web-Security/tree/main/Command%20Injection)
-- Business Logic Vulnerabilities
+- [Business Logic Vulnerabilities](https://github.com/vsang181/Web-Security/tree/main/Business%20Logic%20Vulnerabilities)
 - Information Disclosure
 - Access Control issues 
 - File Upload Vulnerabilities
