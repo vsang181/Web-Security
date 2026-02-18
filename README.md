@@ -15,7 +15,7 @@ These issues live in the application server, backend services, databases, and in
 - [Access Control issues](https://github.com/vsang181/Web-Security/tree/main/Access%20control) 
 - [File Upload Vulnerabilities](https://github.com/vsang181/Web-Security/tree/main/File%20Upload)
 - [Race Conditions](https://github.com/vsang181/Web-Security/tree/main/Race%20conditions) 
-- Server-Side Request Forgery (SSRF)
+- [Server-Side Request Forgery (SSRF)](https://github.com/vsang181/Web-Security/tree/main/Server-side%20request%20forgery%20(SSRF))
 - XXE Injection
 - NoSQL Injection
 - API Testing 
