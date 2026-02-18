@@ -1,4 +1,4 @@
-# NoSQL Injection - Comprehensive Guide
+# NoSQL Injection
 
 NoSQL injection is a web security vulnerability that allows attackers to interfere with database queries in NoSQL databases by manipulating user input. Unlike traditional SQL injection which targets relational databases using SQL syntax, NoSQL injection exploits the diverse query languages, operators, and data structures used by non-relational databases like MongoDB, CouchDB, Redis, and Cassandra. Attackers can exploit NoSQL injection to bypass authentication mechanisms, extract sensitive data character-by-character, modify database records, cause denial-of-service conditions, and in some cases achieve remote code execution through JavaScript evaluation in operators like MongoDB's $where. The lack of a universal query standard and the semi-structured nature of NoSQL data creates unique exploitation opportunities distinct from traditional SQL injection.
 
