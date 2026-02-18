@@ -17,7 +17,7 @@ These issues live in the application server, backend services, databases, and in
 - [Race Conditions](https://github.com/vsang181/Web-Security/tree/main/Race%20conditions) 
 - [Server-Side Request Forgery (SSRF)](https://github.com/vsang181/Web-Security/tree/main/Server-side%20request%20forgery%20(SSRF))
 - [XXE Injection](https://github.com/vsang181/Web-Security/tree/main/XXE%20Injection)
-- NoSQL Injection
+- [NoSQL Injection](https://github.com/vsang181/Web-Security/tree/main/NoSQL%20injection)
 - API Testing 
 - Web Cache Deception
 
