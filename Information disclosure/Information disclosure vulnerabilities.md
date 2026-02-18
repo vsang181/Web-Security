@@ -1,190 +1,848 @@
 # Information disclosure vulnerabilities (information leakage)
 
-Information disclosure is when a website unintentionally reveals sensitive information to users (including unauthenticated visitors).  
-Leaks can be direct (secrets/personal data) or indirect (technical details that reduce attacker effort and enable follow-on exploits).
+Information disclosure vulnerabilities occur when websites unintentionally reveal sensitive information to users or attackers. This can range from technical details about infrastructure to user data, credentials, API keys, and business logic. While sometimes low-severity on its own, leaked information often provides the critical piece needed to construct devastating attacks—revealing framework versions with known CVEs, exposing valid usernames for brute-force, or disclosing API endpoints that bypass security controls.
 
-## What can be leaked
-- User data: usernames, email addresses, addresses, order history, account IDs, financial details, session identifiers.
-- Business data: internal documents, pricing rules, discount logic, private reports, partner data.
-- Technical details: framework versions, internal hostnames/IPs, directory structure, API routes, database table/column names, stack traces, feature flags, cloud metadata.
+Information disclosure is unique because it's often passive—attackers don't "break in" but rather observe what the application voluntarily reveals through error messages, comments, headers, responses, and configurations.
 
-## Where to look (common leak sources)
+> Only test systems you own or are explicitly authorized to assess.
 
-### 1) Error handling
-Verbose errors often reveal stack traces, source file paths/line numbers, query fragments, internal service names, and sometimes environment variables.
+## What is information disclosure? (types and impact)
 
-Example: overly verbose JSON error response
-```json
-{
-  "error": "NullReferenceException",
-  "message": "Object reference not set to an instance of an object",
-  "path": "C:\\app\\Controllers\\CheckoutController.cs:142",
-  "sql": "SELECT * FROM Users WHERE email='...'"
+### Categories of leaked information
+
+#### 1) User and business data:
+- Usernames, email addresses, phone numbers
+- Financial information (credit cards, account balances)
+- Personal identifiable information (PII)
+- Private messages, documents, communications
+- Business-sensitive data (pricing, strategies, partnerships)
+
+#### 2) Technical infrastructure details:
+- Software versions (Apache 2.4.1, PHP 7.2.5)
+- Framework versions (Django 2.1, Rails 5.2)
+- Database types and versions (MySQL 5.7, PostgreSQL 12)
+- Operating system details (Ubuntu 18.04, Windows Server 2019)
+- Internal IP addresses and network topology
+- Directory structures and file paths
+- Technology stack details
+
+#### 3) Application internals:
+- Source code (via backups, error messages, .git exposure)
+- API keys and secrets
+- Database credentials
+- SQL query structures
+- Internal function/method names
+- Configuration files
+- Development comments in code
+
+#### 4) Security mechanisms:
+- Authentication logic details
+- Session token formats
+- Encryption algorithms used
+- API endpoint structures
+- Admin panel locations
+- Hidden functionality
+
+### Why it matters (impact scenarios)
+
+**Direct impact:**
+- Credential theft → Account takeover
+- API key exposure → Infrastructure compromise
+- PII leakage → Privacy violations, GDPR fines
+- Business data exposure → Competitive harm
+
+**Indirect impact (reconnaissance for further attacks):**
+- Framework version disclosure → Search for known CVEs
+- Username enumeration → Enable brute-force attacks
+- Directory structure → Path traversal targeting
+- Error messages → SQL injection or code execution
+- Valid API endpoints → Business logic bypass
+
+## How information disclosure occurs
+
+### Source 1: Error messages (overly verbose)
+
+**Vulnerable - Stack trace exposure:**
+```python
+# Python/Django development mode
+def process_payment(card_number):
+    result = charge_card(card_number)
+    return result
+
+# When error occurs:
+"""
+Traceback (most recent call last):
+  File "/var/www/app/payment.py", line 42, in process_payment
+    result = charge_card(card_number)
+  File "/var/www/app/stripe_api.py", line 15, in charge_card
+    api_key = "sk_live_51HxK2jKm..." # Stripe secret key exposed!
+    response = requests.post('https://api.stripe.com/v1/charges',
+                            auth=(api_key, ''))
+ValueError: Invalid card number format
+"""
+```
+
+**Information leaked:**
+- Complete file paths (`/var/www/app/`)
+- Source code structure
+- API keys in plaintext
+- Third-party service details (Stripe)
+- Function names and logic flow
+
+**Vulnerable - Database error exposure:**
+```sql
+Error: You have an error in your SQL syntax near 
+'SELECT * FROM users WHERE username = 'admin' AND password = 'test'' at line 1
+```
+
+**Information leaked:**
+- Database structure (table name: `users`)
+- Column names (`username`, `password`)
+- SQL query structure (enables SQL injection)
+
+### Source 2: Developer comments
+
+**Vulnerable HTML:**
+```html
+<html>
+<head>
+    <title>Login</title>
+    <!-- TODO: Remove debug endpoint before deployment -->
+    <!-- Debug admin panel: /admin-debug-panel-v2 -->
+    <!-- Default creds: admin / temp_password_2024 -->
+</head>
+<body>
+    <!-- API endpoint for mobile app: /api/v2/auth -->
+    <!-- Note: v2 API has no rate limiting yet -->
+    <form action="/login" method="POST">
+        <input name="username">
+        <input name="password">
+    </form>
+</body>
+</html>
+```
+
+**Information leaked:**
+- Hidden admin panel location
+- Default credentials
+- API endpoint details
+- Known vulnerabilities (no rate limiting)
+
+**Vulnerable JavaScript:**
+```javascript
+// config.js
+const API_KEY = "AIzaSyDXxXxXxXxXxXxXxXxXx"; // Google API key
+const DB_HOST = "10.0.0.5"; // Internal database server
+const DEBUG_MODE = true;
+
+// Authentication logic
+function login(username, password) {
+    // FIXME: Password validation bypassed if username contains 'admin_'
+    if (username.startsWith('admin_')) {
+        return true; // Bypass for testing
+    }
+    
+    // Regular authentication
+    return authenticate(username, password);
 }
 ```
 
-### 2) Debug / diagnostic endpoints
-- Debug toolbars, profiling endpoints, actuator/status endpoints.
-- Swagger/OpenAPI UIs exposing internal APIs.
-- Metrics endpoints (hostnames, queue names, build info).
-- GraphQL introspection enabled in production.
+**Information leaked:**
+- API keys
+- Internal IP addresses
+- Authentication bypass logic
+- Security vulnerabilities documented in comments
 
-### 3) Static files and misconfigured hosting
-- Directory listing enabled.
-- Backup files in web root: `.bak`, `.old`, `.swp`, `.zip`, `.tar.gz`, `~`.
-- Source maps published (`.map`) exposing client-side source.
-- `.git/` or `.svn/` accidentally exposed.
-- Temporary uploads stored under publicly accessible paths.
+### Source 3: Backup and temporary files
 
-Example: backup naming patterns worth checking
-```text
-/.config.php.bak
-/app.js.old
-/index.php~
-/db.sql
-/backup.zip
+**Common exposed files:**
+```
+/.git/                    # Git repository (entire source code)
+/.svn/                    # SVN repository
+/.env                     # Environment variables (secrets)
+/config.php.bak           # Backup configuration file
+/database.yml~            # Editor backup file
+/.DS_Store                # Mac filesystem metadata
+/web.config.old           # Old IIS configuration
+/.idea/                   # IDE project files
+/composer.json            # PHP dependencies (version info)
+/package.json             # Node.js dependencies
 ```
 
-### 4) Client-side leaks
-- API keys and secrets embedded in JS (or mobile apps).
-- Internal endpoints/hostnames in bundles.
-- Comments in HTML/JS revealing TODOs, credentials, or hidden paths.
-
-### 5) Inconsistent responses (enumeration leaks)
-Subtle differences can reveal whether a resource exists or a user is valid:
-- Status codes (`404` vs `403` vs `200`)
-- Response size/body differences
-- Redirect behavior
-- Response timing
-
-Common examples:
-- Username enumeration on login/register/reset flows.
-- Object existence leaks (e.g., `/invoice/12345` behaves differently for valid vs invalid IDs).
-
-### 6) Headers and metadata
-- `Server`, `X-Powered-By`, framework-specific headers.
-- Detailed caching headers revealing shared cache behavior.
-- `Set-Cookie` attributes exposing session handling weaknesses.
-
-Example: header hardening targets
-```text
-Server: nginx/1.18.0
-X-Powered-By: Express
-X-AspNet-Version: 4.0.30319
-```
-
-## How to find information disclosure (practical workflow)
-
-### 1) Passive collection (low-noise)
-- Browse normally and capture traffic.
-- Inspect HTML/JS for comments, endpoints, keys, and source maps.
-- Review response headers everywhere (login, errors, static assets, APIs).
-
-Quick checklist:
-- “View source” on key pages.
-- Check `.map` files for major JS bundles.
-- Search responses for: `key`, `token`, `secret`, `password`, `AKIA`, `BEGIN PRIVATE KEY`, `Authorization`.
-
-If you’re saving responses locally, quick grep examples:
+**Exploitation example:**
 ```bash
-rg -n "AKIA|BEGIN PRIVATE KEY|Authorization:|api[_-]?key|secret|token|password" ./captures
-rg -n "Exception|Stack trace|Traceback|NullReferenceException|SQLSTATE|ORA-" ./captures
+# Download .git repository
+wget -r http://target.com/.git/
+
+# Reconstruct source code
+git reset --hard
+
+# Now have complete application source code
+cat config.php  # Database credentials exposed
 ```
 
-### 2) Error-driven discovery
-Trigger safe, low-impact errors and compare responses:
-- Invalid types (string instead of number)
-- Missing required fields
-- Unsupported HTTP methods
-- Unexpected content types
+**Exposed .env file:**
+```bash
+# http://target.com/.env
+DB_HOST=localhost
+DB_USER=root
+DB_PASSWORD=SuperSecret123!
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+STRIPE_SECRET_KEY=sk_live_51HxK2jKm...
+JWT_SECRET=my_jwt_secret_key_12345
+```
 
-You’re looking for:
-- Stack traces, debug fields
-- Internal IDs
-- Query fragments
+### Source 4: HTTP headers
+
+**Server version disclosure:**
+```http
+HTTP/1.1 200 OK
+Server: Apache/2.4.18 (Ubuntu)
+X-Powered-By: PHP/5.6.30
+X-AspNet-Version: 4.0.30319
+X-AspNetMvc-Version: 5.2
+```
+
+**Information leaked:**
+- Web server type and version (Apache 2.4.18 - searchable for CVEs)
+- Operating system (Ubuntu)
+- Programming language version (PHP 5.6.30 - old, vulnerable)
+- Framework versions (ASP.NET MVC 5.2)
+
+**Custom headers revealing internal structure:**
+```http
+X-Backend-Server: prod-app-server-03
+X-Cache-Status: MISS
+X-Processing-Time: 0.234
+X-User-Role: admin
+X-Request-ID: a1b2c3d4-internal-prod
+```
+
+**Information leaked:**
+- Internal server naming conventions
+- Infrastructure details (caching layer)
+- User privilege information
+- Environment details (prod vs staging)
+
+### Source 5: Robots.txt and sitemap.xml
+
+**Overly revealing robots.txt:**
+```
+User-agent: *
+Disallow: /admin/
+Disallow: /admin-backup/
+Disallow: /api/internal/
+Disallow: /config/
+Disallow: /backup/
+Disallow: /old-site/
+Disallow: /dev/
+Disallow: /test/
+Disallow: /private/
+Disallow: /secret-documents/
+```
+
+**Information leaked:**
+- Hidden admin panels
+- API endpoints
+- Backup locations
+- Development environments accessible in production
+
+### Source 6: Response timing and behavior differences
+
+**Username enumeration via timing:**
+```python
+def login(username, password):
+    user = get_user(username)
+    
+    if not user:
+        return "Invalid credentials"  # Returns immediately (~5ms)
+    
+    # Password hashing takes time
+    if verify_password(user, password):  # ~100ms for bcrypt
+        return "Login successful"
+    
+    return "Invalid credentials"
+```
+
+**Attack:**
+```python
+import time
+
+for username in username_list:
+    start = time.time()
+    response = login(username, "wrong_password")
+    elapsed = time.time() - start
+    
+    if elapsed > 0.05:  # More than 50ms
+        print(f"Valid username: {username}")
+```
+
+**Username enumeration via response differences:**
+```python
+def forgot_password(email):
+    user = get_user_by_email(email)
+    
+    if not user:
+        return "Email not found in our system"  # Leaks info
+    
+    send_reset_email(user.email)
+    return "Password reset email sent"
+```
+
+### Source 7: Debug/diagnostic features enabled in production
+
+**PHP info page accessible:**
+```
+http://target.com/phpinfo.php
+```
+
+**Exposes:**
+- PHP version and configuration
+- All loaded modules
+- Environment variables (including secrets)
 - File paths
+- Database connection details
+- Server software versions
 
-### 3) Content and behavior diffing
-Try the same request with small variations:
-- Existing vs non-existing IDs
-- Valid vs invalid usernames
-- Authenticated vs unauthenticated
-- Different roles/accounts
+**Debug mode enabled:**
+```python
+# Django settings.py
+DEBUG = True  # Should be False in production!
 
-Track:
-- Status codes
-- Response lengths
-- Key phrases
-- Latency differences
-
-### 4) File and path discovery (defensive testing)
-Focus on “likely-to-exist” files and misconfig indicators:
-- `robots.txt`, `sitemap.xml`
-- Common backups and temp files
-- Known framework paths (only where authorized)
-
-## Assessing severity (what matters most)
-Information disclosure is highest severity when it:
-- Exposes credentials/secrets (API keys, private keys, DB creds, session tokens).
-- Exposes personal/regulated data (payment details, national IDs, medical info).
-- Enables account takeover (reset tokens, session identifiers, auth bypass hints).
-- Enables exploitation of known vulnerabilities (exact versions + exposed attack surface).
-- Reveals internal network/infrastructure that enables pivoting.
-
-Strong write-up pattern:
-- “What leaked” + “what an attacker can do with it” + “how far it scales”.
-
-## Prevention (best practices that reduce leaks)
-
-### 1) Make “sensitive” explicit
-Define what counts as sensitive (secrets, tokens, internal URLs, build info, user data, logs), then bake it into:
-- Code review checklists
-- Secure coding guidelines
-- CI policies (secret scanning, debug toggles)
-
-### 2) Use generic error messages externally
-- Return minimal user-facing errors.
-- Log detailed errors server-side (with access control).
-- Ensure consistent responses across auth flows (avoid enumeration signals).
-
-API error pattern (good)
-```json
-{ "error": "Request failed" }
+# Now all errors show:
+# - Full stack traces
+# - Variable values
+# - SQL queries
+# - File paths
+# - Configuration details
 ```
 
-### 3) Disable debug/diagnostics in production
-- Turn off debug toolbars and verbose exception pages.
-- Protect admin/diagnostic endpoints with strong auth + network restrictions.
-- Remove or restrict API docs UIs in production.
+## Finding information disclosure vulnerabilities
 
-### 4) Secure configuration defaults
-Web server:
-- Disable directory listing.
-- Minimize version banners.
-- Don’t serve dotfiles, backups, or repo metadata.
+### Technique 1: Forced browsing for common files
 
-Nginx examples
+**Wordlist of common files:**
+```bash
+/.git/HEAD
+/.git/config
+/.env
+/.env.backup
+/.DS_Store
+/config.php
+/config.php.bak
+/web.config
+/web.config.old
+/database.yml
+/composer.json
+/package.json
+/phpinfo.php
+/info.php
+/test.php
+/backup/
+/old/
+/admin/
+/api-docs/
+/swagger.json
+/openapi.json
+```
+
+**Automation with ffuf:**
+```bash
+ffuf -u https://target.com/FUZZ -w common-files.txt -mc 200,301,302
+```
+
+### Technique 2: Analyzing error messages
+
+**Test invalid input systematically:**
+```http
+# SQL errors
+GET /user?id=1' HTTP/1.1
+
+# File path errors
+GET /download?file=../../../etc/passwd HTTP/1.1
+
+# Type errors
+GET /product?id=abc HTTP/1.1
+
+# Missing parameters
+GET /api/user HTTP/1.1
+(omit required parameters)
+
+# Invalid authentication
+GET /admin HTTP/1.1
+Authorization: Bearer invalid_token
+```
+
+**Look for:**
+- Stack traces
+- SQL query fragments
+- File paths
+- Function names
+- Framework-specific errors
+
+### Technique 3: Examining HTTP headers and responses
+
+**Check every response for:**
+```bash
+# Using curl
+curl -I https://target.com
+
+# Look for:
+Server: Apache/2.4.18
+X-Powered-By: PHP/7.2.5
+X-AspNet-Version: 4.0.30319
+X-Backend-Server: internal-server-01
+Set-Cookie: session=eyJhbGc... (decode JWT)
+```
+
+**Decode JWT tokens:**
+```bash
+# JWT in cookie/header
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxMjMsInJvbGUiOiJhZG1pbiIsImlhdCI6MTYxNjI...
+
+# Decode (jwt.io or command line)
+{
+  "user_id": 123,
+  "role": "admin",  # Reveals privilege system
+  "iat": 1616239022,
+  "secret": "weak_jwt_secret"  # Sometimes leaked in JWT!
+}
+```
+
+### Technique 4: Source code review (view-source)
+
+**Check HTML source for:**
+- Developer comments
+- Hidden form fields with interesting values
+- JavaScript files with API keys
+- Hardcoded credentials
+- API endpoints in AJAX calls
+- Disabled input fields (can be enabled)
+
+**Example:**
+```html
+<input type="hidden" name="role" value="user">
+<!-- Change to "admin" for elevated access -->
+
+<script src="/js/config.js"></script>
+<!-- Contains API_KEY = "sk_live_..." -->
+```
+
+### Technique 5: Testing authentication and access control
+
+**Username enumeration techniques:**
+
+**Different error messages:**
+```
+Username "admin" → "Incorrect password"
+Username "nonexistent" → "Username not found"
+```
+
+**Different status codes:**
+```
+Valid user → 401 Unauthorized
+Invalid user → 404 Not Found
+```
+
+**Different response times:**
+```
+Valid user → 150ms (password hashing occurs)
+Invalid user → 5ms (immediate return)
+```
+
+**Password reset enumeration:**
+```
+Valid email → "Reset email sent"
+Invalid email → "If account exists, reset email will be sent"
+                 (but subtle difference in wording or timing)
+```
+
+### Technique 6: API endpoint discovery
+
+**Common API documentation paths:**
+```
+/api-docs
+/api/docs
+/swagger
+/swagger.json
+/swagger-ui.html
+/api/swagger.json
+/v1/api-docs
+/v2/api-docs
+/openapi.json
+/redoc
+/graphql (GraphQL introspection enabled)
+```
+
+**GraphQL introspection query:**
+```graphql
+{
+  __schema {
+    types {
+      name
+      fields {
+        name
+        type {
+          name
+        }
+      }
+    }
+  }
+}
+```
+
+Reveals entire API structure, all queries, mutations, and types.
+
+### Technique 7: Version disclosure and CVE research
+
+**Identify versions:**
+```http
+Server: nginx/1.14.0
+X-Powered-By: Express 4.16.2
+```
+
+**Search for known vulnerabilities:**
+```bash
+# CVE databases
+searchsploit nginx 1.14.0
+searchsploit express 4.16
+
+# Or use exploit-db.com, nvd.nist.gov
+```
+
+If vulnerable version found, apply public exploit.
+
+## Real-world exploitation examples
+
+### Example 1: .git repository exposure
+
+**Discovery:**
+```bash
+curl http://target.com/.git/HEAD
+# Response: ref: refs/heads/master
+
+# Repository exists!
+```
+
+**Exploitation:**
+```bash
+# Use git-dumper or manual extraction
+git-dumper http://target.com/.git ./extracted-repo
+
+cd extracted-repo
+git log  # View all commits
+
+# Find sensitive data
+grep -r "password" .
+grep -r "api_key" .
+grep -r "secret" .
+
+# Found in config/database.yml:
+# production:
+#   adapter: postgresql
+#   host: db.internal.company.com
+#   username: dbadmin
+#   password: P@ssw0rd123!
+```
+
+**Impact:** Complete source code + database credentials = full compromise.
+
+### Example 2: Error message SQL injection
+
+**Request:**
+```http
+GET /product?id=1' HTTP/1.1
+```
+
+**Response:**
+```
+Database Error: You have an error in your SQL syntax near 
+'SELECT * FROM products WHERE id = '1'' at line 1
+
+Table: products
+Columns: id, name, price, description, stock_quantity
+```
+
+**Information gained:**
+- SQL injection confirmed
+- Table name: `products`
+- Column names enumerated
+- Can now craft precise injection payloads
+
+### Example 3: phpinfo() exposure
+
+**Discovery:**
+```
+http://target.com/phpinfo.php → 200 OK
+```
+
+**Information exposed:**
+```
+PHP Version: 7.2.5
+Server API: Apache
+System: Linux ubuntu 4.15.0-1021-aws
+Document Root: /var/www/html
+Loaded Extensions: mysqli, pdo_mysql, openssl, curl
+
+Environment Variables:
+DB_HOST=localhost
+DB_USER=webapp
+DB_PASS=MySecretPass123!
+AWS_KEY=AKIAIOSFODNN7EXAMPLE
+```
+
+**Impact:** Database credentials + AWS keys + system information = infrastructure compromise.
+
+### Example 4: Debug mode revealing JWT secret
+
+**Error in debug mode:**
+```python
+jwt.exceptions.InvalidSignatureError: Signature verification failed
+
+JWT Header: {"alg":"HS256","typ":"JWT"}
+JWT Payload: {"user_id":123,"role":"user"}
+Secret used: "my_super_secret_jwt_key_123"
+
+File "/app/auth.py", line 45, in verify_token
+    decoded = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+```
+
+**Exploitation:**
+```python
+import jwt
+
+# Now we know the secret!
+SECRET_KEY = "my_super_secret_jwt_key_123"
+
+# Forge admin token
+payload = {
+    "user_id": 1,
+    "role": "admin"  # Escalate privileges
+}
+
+forged_token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+
+# Use forged token
+requests.get('/admin', headers={'Authorization': f'Bearer {forged_token}'})
+```
+
+### Example 5: Username enumeration enabling credential stuffing
+
+**Test registration:**
+```http
+POST /register HTTP/1.1
+
+username=admin&password=test123
+
+Response: "Username 'admin' already taken"
+```
+
+**Enumerate valid usernames:**
+```python
+for username in common_usernames:
+    response = register(username, "test")
+    if "already taken" in response:
+        valid_users.append(username)
+
+# Found: admin, john, sarah, mike
+```
+
+**Credential stuffing attack:**
+```python
+# Use leaked password databases
+for user in valid_users:
+    for password in leaked_passwords:
+        if login(user, password):
+            print(f"Compromised: {user}:{password}")
+```
+
+## Prevention strategies
+
+### 1) Disable debug features in production
+
+**Bad - Debug enabled:**
+```python
+# Django settings.py
+DEBUG = True
+ALLOWED_HOSTS = ['*']
+```
+
+**Good - Production configuration:**
+```python
+# settings.py
+import os
+
+DEBUG = os.environ.get('DEBUG', 'False') == 'True'
+ALLOWED_HOSTS = ['example.com', 'www.example.com']
+
+# Custom error handlers
+HANDLER500 = 'myapp.views.custom_error_handler'
+```
+
+### 2) Use generic error messages
+
+**Bad - Verbose errors:**
+```python
+try:
+    user = User.objects.get(username=username)
+except User.DoesNotExist:
+    return "Username 'admin' does not exist"
+
+if not check_password(password, user.password):
+    return "Incorrect password for user 'admin'"
+```
+
+**Good - Generic errors:**
+```python
+try:
+    user = User.objects.get(username=username)
+    if not check_password(password, user.password):
+        raise AuthenticationError()
+except (User.DoesNotExist, AuthenticationError):
+    return "Invalid username or password"
+```
+
+### 3) Remove sensitive headers
+
+**Bad - Verbose headers:**
+```python
+# Default configuration exposes everything
+```
+
+**Good - Minimal headers:**
+```python
+# nginx.conf
+server_tokens off;  # Hide nginx version
+
+# or Apache httpd.conf
+ServerTokens Prod
+ServerSignature Off
+
+# Application code
+response.headers.pop('X-Powered-By', None)
+response.headers.pop('Server', None)
+```
+
+### 4) Prevent file exposure
+
+**Bad - Exposed sensitive files:**
+```
+.git/ directory accessible
+.env file readable
+phpinfo.php exists
+```
+
+**Good - Block sensitive paths:**
 ```nginx
-autoindex off;
-server_tokens off;
+# nginx.conf
+location ~ /\. {
+    deny all;
+}
 
-location ~ /\. { deny all; }
-location ~* \.(bak|old|swp|zip|tar|gz|7z|~)$ { deny all; }
+location ~ \.(bak|old|backup|~|swp)$ {
+    deny all;
+}
+
+location ~ (phpinfo|info|test)\.php$ {
+    deny all;
+}
 ```
 
-### 5) Secrets management (don’t let secrets reach clients)
-- Never ship secrets in JS, mobile apps, or HTML.
-- Keep secrets in server-side secret stores / environment injection.
-- Rotate secrets if exposure is suspected.
-- Use scoped keys (least privilege) so a leak has limited blast radius.
+### 5) Remove comments before deployment
 
-### 6) Build-time and repo hygiene
-- Strip developer comments where appropriate.
-- Scan repos and build artifacts for secrets.
-- Prevent source maps from being published publicly (or restrict access).
-- Ensure backup artifacts and CI outputs never land in web root.
+**Build process:**
+```bash
+# Webpack/minification removes comments automatically
+webpack --mode production
 
-### 7) Logging and monitoring
-- Redact sensitive fields in logs (passwords, tokens, Authorization headers).
-- Alert on suspicious requests for backups, repo metadata, and debug endpoints.
-- Track spikes in 4xx/5xx patterns that suggest probing.
+# Or explicitly strip HTML comments
+html-minifier --remove-comments input.html -o output.html
+
+# Strip PHP comments
+php-stripwhitespace input.php > output.php
+```
+
+### 6) Implement consistent response times
+
+**Bad - Timing oracle:**
+```python
+if user_exists(username):
+    if verify_password(password):  # Slow operation
+        return success()
+```
+
+**Good - Constant time:**
+```python
+user = get_user(username)
+
+# Always hash, even for non-existent users
+if user:
+    hash_to_check = user.password_hash
+else:
+    hash_to_check = DUMMY_HASH  # Dummy value
+
+# Always perform timing-expensive operation
+password_valid = constant_time_compare(
+    hash_password(password), 
+    hash_to_check
+)
+
+if user and password_valid:
+    return success()
+else:
+    time.sleep(random.uniform(0.01, 0.02))  # Add jitter
+    return "Invalid credentials"
+```
+
+### 7) Secure API documentation
+
+**Bad - Public API docs with no auth:**
+```
+https://api.example.com/docs
+→ Full API documentation accessible to anyone
+```
+
+**Good - Protected documentation:**
+```python
+@app.route('/api/docs')
+@require_authentication
+@require_role('developer')
+def api_docs():
+    return render_api_documentation()
+```
+
+Or disable in production entirely.
+
+## Quick reference
+
+### Common information leakage sources:
+```
+Error messages - Stack traces, SQL errors, exceptions
+HTTP headers - Server, X-Powered-By, version info
+Comments - HTML, JavaScript, developer notes
+Backup files - .bak, .old, ~, .swp
+Source control - .git/, .svn/
+Config files - .env, web.config, database.yml
+Debug pages - phpinfo.php, /debug, /trace
+API docs - /swagger, /api-docs, GraphQL introspection
+Response timing - Username enumeration via delays
+Response differences - Different messages/status codes
+```
+
+### Files to check:
+```
+/.git/HEAD
+/.env
+/.DS_Store
+/phpinfo.php
+/robots.txt
+/sitemap.xml
+/composer.json
+/package.json
+/web.config
+/config.php
+/swagger.json
+/.idea/
+/backup/
+```
