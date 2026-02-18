@@ -30,7 +30,7 @@ These issues execute in or abuse the user’s browser context. They commonly lea
 - [Cross-Origin Resource Sharing (CORS)](https://github.com/vsang181/Web-Security/tree/main/Cross-origin%20resource%20sharing%20(CORS)) 
 - [Clickjacking](https://github.com/vsang181/Web-Security/tree/main/Clickjacking)
 - [DOM-based vulnerabilities](https://github.com/vsang181/Web-Security/tree/main/DOM-based%20vulnerabilities) 
-- WebSockets 
+- [WebSockets](https://github.com/vsang181/Web-Security/tree/main/WebSockets) 
 
 ## 3) Advanced (modern + complex)
 
