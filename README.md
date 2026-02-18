@@ -13,7 +13,7 @@ These issues live in the application server, backend services, databases, and in
 - [Business Logic Vulnerabilities](https://github.com/vsang181/Web-Security/tree/main/Business%20Logic%20Vulnerabilities)
 - [Information Disclosure](https://github.com/vsang181/Web-Security/tree/main/Information%20disclosure)
 - [Access Control issues](https://github.com/vsang181/Web-Security/tree/main/Access%20control) 
-- File Upload Vulnerabilities
+- [File Upload Vulnerabilities](https://github.com/vsang181/Web-Security/tree/main/File%20Upload)
 - Race Conditions 
 - Server-Side Request Forgery (SSRF)
 - XXE Injection
