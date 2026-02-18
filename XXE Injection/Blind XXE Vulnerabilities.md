@@ -1,4 +1,4 @@
-# Finding and Exploiting Blind XXE Vulnerabilities - Comprehensive Guide
+# Finding and Exploiting Blind XXE Vulnerabilities
 
 Blind XXE vulnerabilities occur when an application is vulnerable to XML External Entity injection but does not return the values of defined external entities in its responses, making direct file retrieval impossible through standard XXE techniques. Unlike regular XXE where file contents appear directly in application responses, blind XXE requires sophisticated out-of-band techniques to confirm exploitation and exfiltrate data. Attackers exploit blind XXE through two primary methods: triggering out-of-band network interactions to attacker-controlled systems (DNS lookups, HTTP requests) to exfiltrate data via URL parameters, and inducing XML parsing errors that leak sensitive information in error messages. These techniques often require hosting malicious DTDs externally or repurposing local DTD files already present on the target system.
 
