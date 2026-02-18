@@ -28,7 +28,7 @@ These issues execute in or abuse the user’s browser context. They commonly lea
 - [Cross-Site Scripting (XSS)](https://github.com/vsang181/Web-Security/tree/main/Cross-site%20scripting)
 - [Cross-Site Request Forgery (CSRF)](https://github.com/vsang181/Web-Security/tree/main/Cross-site%20request%20forgery%20(CSRF))
 - [Cross-Origin Resource Sharing (CORS)](https://github.com/vsang181/Web-Security/tree/main/Cross-origin%20resource%20sharing%20(CORS)) 
-- Clickjacking
+- [Clickjacking](https://github.com/vsang181/Web-Security/tree/main/Clickjacking)
 - DOM-based vulnerabilities 
 - WebSockets 
 
