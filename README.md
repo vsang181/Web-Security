@@ -19,7 +19,7 @@ These issues live in the application server, backend services, databases, and in
 - [XXE Injection](https://github.com/vsang181/Web-Security/tree/main/XXE%20Injection)
 - [NoSQL Injection](https://github.com/vsang181/Web-Security/tree/main/NoSQL%20injection)
 - [API Testing](https://github.com/vsang181/Web-Security/tree/main/API%20Testing) 
-- Web Cache Deception
+- [Web Cache Deception](https://github.com/vsang181/Web-Security/tree/main/Web%20cache%20deception)
 
 ## 2) Client-side (browser)
 
