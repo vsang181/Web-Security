@@ -1,12 +1,8 @@
 # Race conditions (comprehensive guide)
 
-Based on PortSwigger Web Security Academy and "Smashing the State Machine" research (Black Hat USA 2023)
-
 Race conditions are timing vulnerabilities that occur when applications process concurrent requests without adequate safeguards, allowing multiple threads to interact with the same data simultaneously and cause a "collision" that leads to unintended behavior. Unlike typical web vulnerabilities that exploit code flaws, race conditions exploit the temporal dimension—the precise timing and ordering of operations. When successfully exploited, attackers use carefully synchronized requests to abuse temporary application sub-states, bypass business logic, and achieve impacts ranging from discount code abuse to complete authentication bypass.
 
-The paradigm shift in race condition research: **with race conditions, everything is multi-step**. Every single HTTP request may transition an application through multiple fleeting, hidden states (sub-states) that exist for mere milliseconds before the request completes. [goa2023.nullcon](https://goa2023.nullcon.net/doc/goa-2023/Smashing-the-State-Machine-The-True-Potential-of-Web-Race-Conditions.pdf)
-
-> Only test systems you own or are explicitly authorized to assess.
+The paradigm shift in race condition research: **with race conditions, everything is multi-step**. Every single HTTP request may transition an application through multiple fleeting, hidden states (sub-states) that exist for mere milliseconds before the request completes. 
 
 ## What are race conditions? (fundamentals)
 
@@ -32,7 +28,7 @@ Result: Discount applied twice
 
 ### The race window
 
-**Definition:** The brief period during which a collision is possible—often just 1-2 milliseconds. [goa2023.nullcon](https://goa2023.nullcon.net/doc/goa-2023/Smashing-the-State-Machine-The-True-Potential-of-Web-Race-Conditions.pdf)
+**Definition:** The brief period during which a collision is possible—often just 1-2 milliseconds. 
 
 **Sub-state example:**
 ```
@@ -46,7 +42,7 @@ State machine for discount code:
 The "race window" exists during the [Checking...] → [Applying...] states
 ```
 
-**Key insight:** Applications transition through temporary sub-states that they enter and exit before request processing completes. [portswigger](https://portswigger.net/web-security/race-conditions)
+**Key insight:** Applications transition through temporary sub-states that they enter and exit before request processing completes. 
 
 ### Historical challenge: Network jitter
 
@@ -66,11 +62,11 @@ Race window: 1ms
 Result: Requests miss the window → attack fails
 ```
 
-**Network jitter:** Unpredictable delays in TCP packet arrival that prevent precise timing. [goa2023.nullcon](https://goa2023.nullcon.net/doc/goa-2023/Smashing-the-State-Machine-The-True-Potential-of-Web-Race-Conditions.pdf)
+**Network jitter:** Unpredictable delays in TCP packet arrival that prevent precise timing. 
 
 ### Breakthrough: Single-packet attack (Black Hat 2023)
 
-**Concept:** Squeeze 20-30 HTTP/2 requests into a single TCP packet, eliminating network jitter entirely. [goa2023.nullcon](https://goa2023.nullcon.net/doc/goa-2023/Smashing-the-State-Machine-The-True-Potential-of-Web-Race-Conditions.pdf)
+**Concept:** Squeeze 20-30 HTTP/2 requests into a single TCP packet, eliminating network jitter entirely. 
 
 **Performance comparison (Melbourne → Dublin, 17,208km):**
 
@@ -79,7 +75,7 @@ Result: Requests miss the window → attack fails
 | Last-byte sync (HTTP/1) | 4ms | 3ms | Baseline |
 | Single-packet attack (HTTP/2) | 1ms | 0.3ms | **4-10x better** |
 
-**Real-world impact:** One vulnerability required 30 seconds to exploit with single-packet attack vs. 2+ hours with last-byte sync. [goa2023.nullcon](https://goa2023.nullcon.net/doc/goa-2023/Smashing-the-State-Machine-The-True-Potential-of-Web-Race-Conditions.pdf)
+**Real-world impact:** One vulnerability required 30 seconds to exploit with single-packet attack vs. 2+ hours with last-byte sync. 
 
 ## Types of race conditions
 
@@ -184,7 +180,7 @@ Final cart total: $0.00  (100% discount + refund!)
 
 ### Type 2: Hidden multi-step sequences
 
-**Paradigm shift:** A single HTTP request can transition through multiple internal states. [goa2023.nullcon](https://goa2023.nullcon.net/doc/goa-2023/Smashing-the-State-Machine-The-True-Potential-of-Web-Race-Conditions.pdf)
+**Paradigm shift:** A single HTTP request can transition through multiple internal states. 
 
 #### Example: MFA bypass via race condition
 
@@ -373,7 +369,7 @@ But wait... sometimes the collision causes:
 To: attacker@evil.com  Token: xyz789  ← Attacker receives victim's valid token!
 ```
 
-**Why:** Email sending happens asynchronously. The `send_email_async` call reads `email` from its parameter but fetches token/confirmation link from the database, creating a race window. [goa2023.nullcon](https://goa2023.nullcon.net/doc/goa-2023/Smashing-the-State-Machine-The-True-Potential-of-Web-Race-Conditions.pdf)
+**Why:** Email sending happens asynchronously. The `send_email_async` call reads `email` from its parameter but fetches token/confirmation link from the database, creating a race window. 
 
 #### Real-world case study: GitLab CVE-2022-4037
 
@@ -427,7 +423,7 @@ Token: [valid for victim@company.com]  ← Attacker receives this!
 - Hijack pending project invitations
 - OpenID account takeover on third-party sites trusting GitLab
 
-**Video proof of concept:** Documented in PortSwigger Research paper. [goa2023.nullcon](https://goa2023.nullcon.net/doc/goa-2023/Smashing-the-State-Machine-The-True-Potential-of-Web-Race-Conditions.pdf)
+**Video proof of concept:** Documented in PortSwigger Research paper. 
 
 ### Type 5: Partial construction race conditions
 
@@ -618,7 +614,7 @@ Token also valid for victim's reset!
 
 ## PortSwigger methodology for finding race conditions
 
-**From "Smashing the State Machine" whitepaper.** [goa2023.nullcon](https://goa2023.nullcon.net/doc/goa-2023/Smashing-the-State-Machine-The-True-Potential-of-Web-Race-Conditions.pdf)
+**From "Smashing the State Machine" whitepaper.** 
 
 ### Phase 1: Predict potential collisions
 
@@ -702,7 +698,7 @@ Total: 50ms, 2 emails  ← CLUE! (expected 3)
 
 **Step 3: Analyze clues**
 
-**Any deviation is a clue:** [goa2023.nullcon](https://goa2023.nullcon.net/doc/goa-2023/Smashing-the-State-Machine-The-True-Potential-of-Web-Race-Conditions.pdf)
+**Any deviation is a clue:** 
 
 **Direct clues (response changes):**
 - Different status codes (500, 404, 403)
@@ -1079,7 +1075,7 @@ Time-based collision:
 
 **Exploitation:** Same as GitLab—attacker receives victim's confirmation token.
 
-**Lesson:** Race conditions aren't always about precise millisecond timing. Batch processing creates inherent race windows. [goa2023.nullcon](https://goa2023.nullcon.net/doc/goa-2023/Smashing-the-State-Machine-The-True-Potential-of-Web-Race-Conditions.pdf)
+**Lesson:** Race conditions aren't always about precise millisecond timing. Batch processing creates inherent race windows. 
 
 ### Case study 3: Bank account overdraft
 
@@ -1198,7 +1194,7 @@ def handleResponse(req, interesting):
 
 ## Prevention strategies
 
-**From PortSwigger Research  and Web Security Academy.** [portswigger](https://portswigger.net/web-security/race-conditions)
+**From PortSwigger Research  and Web Security Academy.** 
 
 ### Strategy 1: Eliminate sub-states (atomic operations)
 
