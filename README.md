@@ -36,7 +36,7 @@ These issues execute in or abuse the user’s browser context. They commonly lea
 
 These are higher-complexity vulnerabilities involving modern architectures, middleware, authentication standards, serialization, caches, and protocol quirks.
 
-- Insecure Deserialization
+- [Insecure Deserialization](https://github.com/vsang181/Web-Security/tree/main/Insecure%20deserialization)
 - Web LLM Attacks 
 - GraphQL API vulnerabilities 
 - Server-Side Template Injection 
