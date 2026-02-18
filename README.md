@@ -38,7 +38,7 @@ These are higher-complexity vulnerabilities involving modern architectures, midd
 
 - [Insecure Deserialization](https://github.com/vsang181/Web-Security/tree/main/Insecure%20deserialization)
 - [Web LLM Attacks](https://github.com/vsang181/Web-Security/tree/main/Web%20LLM%20Attacks) 
-- GraphQL API vulnerabilities 
+- [GraphQL API vulnerabilities](https://github.com/vsang181/Web-Security/tree/main/GraphQL) 
 - Server-Side Template Injection 
 - Web Cache Poisoning
 - HTTP Host Header attacks
