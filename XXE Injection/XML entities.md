@@ -1,4 +1,4 @@
-# XML Entities - Comprehensive Guide
+# XML Entities
 
 Based on PortSwigger Web Security Academy and XML specification fundamentals
 
