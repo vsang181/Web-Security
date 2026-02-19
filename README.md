@@ -40,11 +40,11 @@ These are higher-complexity vulnerabilities involving modern architectures, midd
 - [Web LLM Attacks](https://github.com/vsang181/Web-Security/tree/main/Web%20LLM%20Attacks) 
 - [GraphQL API vulnerabilities](https://github.com/vsang181/Web-Security/tree/main/GraphQL) 
 - [Server-Side Template Injection](https://github.com/vsang181/Web-Security/tree/main/Server-side%20template%20injection) 
-- Web Cache Poisoning
-- HTTP Host Header attacks
-- HTTP Request Smuggling
-- OAuth authentication issues 
-- JWT attacks 
-- Prototype Pollution
+- [Web Cache Poisoning](https://github.com/vsang181/Web-Security/tree/main/Web%20Cache%20Poisoning)
+- [HTTP Host Header attacks](https://github.com/vsang181/Web-Security/tree/main/HTTP%20Host%20header%20attacks)
+- [HTTP Request Smuggling](https://github.com/vsang181/Web-Security/tree/main/HTTP%20request%20smuggling)
+- [OAuth authentication issues ](https://github.com/vsang181/Web-Security/tree/main/OAuth%20authentication%20issues)
+- [JWT attacks](https://github.com/vsang181/Web-Security/tree/main/JWT%20attacks) 
+- [Prototype Pollution](https://github.com/vsang181/Web-Security/tree/main/Prototype%20Pollution)
 
-> Essential Skills
+> [Essential Skills](https://github.com/vsang181/Web-Security/tree/main/Essential%20Skills)
